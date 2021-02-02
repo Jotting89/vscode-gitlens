@@ -15,7 +15,7 @@ export class GitBranchParser {
 		`${lb}u${rb}%(upstream:short)`, // branch upstream
 		`${lb}t${rb}%(upstream:track)`, // branch upstream tracking state
 		`${lb}r${rb}%(objectname)`, // ref
-		`${lb}d${rb}%(committerdate:iso8601)` // committer date
+		`${lb}d${rb}%(committerdate:iso8601)`, // committer date
 	].join('');
 
 	@debug({ args: false, singleLine: true })
@@ -44,6 +44,8 @@ export class GitBranchParser {
 			if (name.startsWith('refs/remotes/')) {
 				// Strip off refs/remotes/
 				name = name.substr(13);
+				if (name.endsWith('/HEAD')) continue;
+
 				remote = true;
 			} else {
 				// Strip off refs/heads/
@@ -63,8 +65,8 @@ export class GitBranchParser {
 					// Stops excessive memory usage -- https://bugs.chromium.org/p/v8/issues/detail?id=2869
 					tracking == null || tracking.length === 0 ? undefined : ` ${tracking}`.substr(1),
 					Number(ahead) || 0,
-					Number(behind) || 0
-				)
+					Number(behind) || 0,
+				),
 			);
 		} while (true);
 

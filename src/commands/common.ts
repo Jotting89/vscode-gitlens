@@ -4,116 +4,192 @@ import {
 	commands,
 	Disposable,
 	ExtensionContext,
+	GitTimelineItem,
 	SourceControlResourceGroup,
 	SourceControlResourceState,
 	TextDocumentShowOptions,
 	TextEditor,
 	TextEditorEdit,
+	TimelineItem,
 	Uri,
 	ViewColumn,
 	window,
-	workspace
+	workspace,
 } from 'vscode';
+import { Action, ActionContext } from '../api/gitlens';
 import { BuiltInCommands, DocumentSchemes, ImageMimetypes } from '../constants';
 import { Container } from '../container';
-import { GitBranch, GitCommit, GitContributor, GitFile, GitRemote, GitUri, Repository } from '../git/gitService';
+import { GitBranch, GitCommit, GitContributor, GitFile, GitReference, GitRemote, GitTag, Repository } from '../git/git';
+import { GitUri } from '../git/gitUri';
 import { Logger } from '../logger';
-import { CommandQuickPickItem, RepositoriesQuickPick } from '../quickpicks';
-// import { Telemetry } from '../telemetry';
+import { CommandQuickPickItem, RepositoryPicker } from '../quickpicks';
 import { ViewNode, ViewRefNode } from '../views/nodes';
 
 export enum Commands {
+	ActionPrefix = 'gitlens.action.',
+	AddAuthors = 'gitlens.addAuthors',
+	BrowseRepoAtRevision = 'gitlens.browseRepoAtRevision',
+	BrowseRepoAtRevisionInNewWindow = 'gitlens.browseRepoAtRevisionInNewWindow',
+	BrowseRepoBeforeRevision = 'gitlens.browseRepoBeforeRevision',
+	BrowseRepoBeforeRevisionInNewWindow = 'gitlens.browseRepoBeforeRevisionInNewWindow',
 	ClearFileAnnotations = 'gitlens.clearFileAnnotations',
 	CloseUnchangedFiles = 'gitlens.closeUnchangedFiles',
+	CloseUpdatesView = 'gitlens.closeUpdatesView',
+	CloseWelcomeView = 'gitlens.closeWelcomeView',
+	CompareWith = 'gitlens.compareWith',
+	CompareHeadWith = 'gitlens.compareHeadWith',
+	CompareWorkingWith = 'gitlens.compareWorkingWith',
 	ComputingFileAnnotations = 'gitlens.computingFileAnnotations',
+	ConnectRemoteProvider = 'gitlens.connectRemoteProvider',
+	CopyCurrentBranch = 'gitlens.copyCurrentBranch',
 	CopyMessageToClipboard = 'gitlens.copyMessageToClipboard',
-	CopyRemoteFileUrlToClipboard = 'gitlens.copyRemoteFileUrlToClipboard',
+	CopyRemoteBranchesUrl = 'gitlens.copyRemoteBranchesUrl',
+	CopyRemoteBranchUrl = 'gitlens.copyRemoteBranchUrl',
+	CopyRemoteCommitUrl = 'gitlens.copyRemoteCommitUrl',
+	CopyRemoteComparisonUrl = 'gitlens.copyRemoteComparisonUrl',
+	CopyRemoteFileUrl = 'gitlens.copyRemoteFileUrlToClipboard',
+	CopyRemoteFileUrlFrom = 'gitlens.copyRemoteFileUrlFrom',
+	CopyRemotePullRequestUrl = 'gitlens.copyRemotePullRequestUrl',
+	CopyRemoteRepositoryUrl = 'gitlens.copyRemoteRepositoryUrl',
 	CopyShaToClipboard = 'gitlens.copyShaToClipboard',
 	DiffDirectory = 'gitlens.diffDirectory',
 	DiffDirectoryWithHead = 'gitlens.diffDirectoryWithHead',
-	DiffHeadWith = 'gitlens.diffHeadWith',
-	// DEPRECATED
-	DiffHeadWithBranch = 'gitlens.diffHeadWithBranch',
-	DiffWorkingWith = 'gitlens.diffWorkingWith',
-	// DEPRECATED
-	DiffWorkingWithBranch = 'gitlens.diffWorkingWithBranch',
-	ExternalDiffAll = 'gitlens.externalDiffAll',
 	DiffWith = 'gitlens.diffWith',
-	// DEPRECATED
-	DiffWithBranch = 'gitlens.diffWithBranch',
-	DiffWithRef = 'gitlens.diffWithRef',
 	DiffWithNext = 'gitlens.diffWithNext',
 	DiffWithNextInDiffLeft = 'gitlens.diffWithNextInDiffLeft',
+	DiffWithNextInDiffRight = 'gitlens.diffWithNextInDiffRight',
 	DiffWithPrevious = 'gitlens.diffWithPrevious',
+	DiffWithPreviousInDiffLeft = 'gitlens.diffWithPreviousInDiffLeft',
 	DiffWithPreviousInDiffRight = 'gitlens.diffWithPreviousInDiffRight',
 	DiffLineWithPrevious = 'gitlens.diffLineWithPrevious',
 	DiffWithRevision = 'gitlens.diffWithRevision',
+	DiffWithRevisionFrom = 'gitlens.diffWithRevisionFrom',
 	DiffWithWorking = 'gitlens.diffWithWorking',
+	DiffWithWorkingInDiffLeft = 'gitlens.diffWithWorkingInDiffLeft',
+	DiffWithWorkingInDiffRight = 'gitlens.diffWithWorkingInDiffRight',
 	DiffLineWithWorking = 'gitlens.diffLineWithWorking',
-	ExploreRepoAtRevision = 'gitlens.exploreRepoAtRevision',
+	DisconnectRemoteProvider = 'gitlens.disconnectRemoteProvider',
+	DisableRebaseEditor = 'gitlens.disableRebaseEditor',
+	EnableRebaseEditor = 'gitlens.enableRebaseEditor',
 	ExternalDiff = 'gitlens.externalDiff',
+	ExternalDiffAll = 'gitlens.externalDiffAll',
 	FetchRepositories = 'gitlens.fetchRepositories',
 	InviteToLiveShare = 'gitlens.inviteToLiveShare',
 	OpenChangedFiles = 'gitlens.openChangedFiles',
-	OpenBranchesInRemote = 'gitlens.openBranchesInRemote',
-	OpenBranchInRemote = 'gitlens.openBranchInRemote',
-	OpenCommitInRemote = 'gitlens.openCommitInRemote',
-	OpenFileInRemote = 'gitlens.openFileInRemote',
-	OpenFileRevision = 'gitlens.openFileRevision',
-	OpenFileRevisionFrom = 'gitlens.openFileRevisionFrom',
-	// DEPRECATED
-	OpenFileRevisionFromBranch = 'gitlens.openFileRevisionFromBranch',
-	OpenInRemote = 'gitlens.openInRemote',
-	OpenRepoInRemote = 'gitlens.openRepoInRemote',
+	OpenBranchesOnRemote = 'gitlens.openBranchesOnRemote',
+	OpenBranchOnRemote = 'gitlens.openBranchOnRemote',
+	OpenCommitOnRemote = 'gitlens.openCommitOnRemote',
+	OpenComparisonOnRemote = 'gitlens.openComparisonOnRemote',
+	OpenFileFromRemote = 'gitlens.openFileFromRemote',
+	OpenFileOnRemote = 'gitlens.openFileOnRemote',
+	OpenFileOnRemoteFrom = 'gitlens.openFileOnRemoteFrom',
+	OpenFileAtRevision = 'gitlens.openFileRevision',
+	OpenFileAtRevisionFrom = 'gitlens.openFileRevisionFrom',
+	OpenOnRemote = 'gitlens.openOnRemote',
+	OpenPullRequestOnRemote = 'gitlens.openPullRequestOnRemote',
+	OpenAssociatedPullRequestOnRemote = 'gitlens.openAssociatedPullRequestOnRemote',
+	OpenRepoOnRemote = 'gitlens.openRepoOnRemote',
 	OpenRevisionFile = 'gitlens.openRevisionFile',
+	OpenRevisionFileInDiffLeft = 'gitlens.openRevisionFileInDiffLeft',
+	OpenRevisionFileInDiffRight = 'gitlens.openRevisionFileInDiffRight',
 	OpenWorkingFile = 'gitlens.openWorkingFile',
+	OpenWorkingFileInDiffLeft = 'gitlens.openWorkingFileInDiffLeft',
+	OpenWorkingFileInDiffRight = 'gitlens.openWorkingFileInDiffRight',
 	PullRepositories = 'gitlens.pullRepositories',
 	PushRepositories = 'gitlens.pushRepositories',
 	GitCommands = 'gitlens.gitCommands',
+	QuickOpenFileHistory = 'gitlens.quickOpenFileHistory',
+	RefreshHover = 'gitlens.refreshHover',
+	ResetRemoteConnectionAuthorization = 'gitlens.resetRemoteConnectionAuthorization',
 	ResetSuppressedWarnings = 'gitlens.resetSuppressedWarnings',
 	RevealCommitInView = 'gitlens.revealCommitInView',
 	SearchCommits = 'gitlens.showCommitSearch',
-	SearchCommitsInView = 'gitlens.views.search.searchCommits',
+	SearchCommitsInView = 'gitlens.views.searchAndCompare.searchCommits',
+	SetViewsLayout = 'gitlens.setViewsLayout',
+	ShowBranchesView = 'gitlens.showBranchesView',
 	ShowCommitInView = 'gitlens.showCommitInView',
 	ShowCommitsInView = 'gitlens.showCommitsInView',
-	ShowCompareView = 'gitlens.showCompareView',
+	ShowCommitsView = 'gitlens.showCommitsView',
+	ShowContributorsView = 'gitlens.showContributorsView',
 	ShowFileHistoryView = 'gitlens.showFileHistoryView',
 	ShowFileHistoryInView = 'gitlens.showFileHistoryInView',
-	ShowLineHistoryView = 'gitlens.showLineHistoryView',
 	ShowLastQuickPick = 'gitlens.showLastQuickPick',
+	ShowLineHistoryView = 'gitlens.showLineHistoryView',
 	ShowQuickBranchHistory = 'gitlens.showQuickBranchHistory',
-	ShowQuickCommitDetails = 'gitlens.showQuickCommitDetails',
-	ShowQuickCommitFileDetails = 'gitlens.showQuickCommitFileDetails',
+	ShowQuickCommit = 'gitlens.showQuickCommitDetails',
+	ShowQuickCommitFile = 'gitlens.showQuickCommitFileDetails',
 	ShowQuickCurrentBranchHistory = 'gitlens.showQuickRepoHistory',
 	ShowQuickFileHistory = 'gitlens.showQuickFileHistory',
 	ShowQuickRepoStatus = 'gitlens.showQuickRepoStatus',
-	ShowQuickRevisionDetails = 'gitlens.showQuickRevisionDetails',
+	ShowQuickCommitRevision = 'gitlens.showQuickRevisionDetails',
+	ShowQuickCommitRevisionInDiffLeft = 'gitlens.showQuickRevisionDetailsInDiffLeft',
+	ShowQuickCommitRevisionInDiffRight = 'gitlens.showQuickRevisionDetailsInDiffRight',
 	ShowQuickStashList = 'gitlens.showQuickStashList',
+	ShowRemotesView = 'gitlens.showRemotesView',
 	ShowRepositoriesView = 'gitlens.showRepositoriesView',
-	ShowSearchView = 'gitlens.showSearchView',
-	ShowHistoryPage = 'gitlens.showHistoryPage',
+	ShowSearchAndCompareView = 'gitlens.showSearchAndCompareView',
 	ShowSettingsPage = 'gitlens.showSettingsPage',
-	ShowSettingsPageAndJumpToCompareView = 'gitlens.showSettingsPage#compare-view',
+	ShowSettingsPageAndJumpToBranchesView = 'gitlens.showSettingsPage#branches-view',
+	ShowSettingsPageAndJumpToCommitsView = 'gitlens.showSettingsPage#commits-view',
+	ShowSettingsPageAndJumpToContributorsView = 'gitlens.showSettingsPage#contributors-view',
 	ShowSettingsPageAndJumpToFileHistoryView = 'gitlens.showSettingsPage#file-history-view',
 	ShowSettingsPageAndJumpToLineHistoryView = 'gitlens.showSettingsPage#line-history-view',
+	ShowSettingsPageAndJumpToRemotesView = 'gitlens.showSettingsPage#remotes-view',
 	ShowSettingsPageAndJumpToRepositoriesView = 'gitlens.showSettingsPage#repositories-view',
-	ShowSettingsPageAndJumpToSearchCommitsView = 'gitlens.showSettingsPage#search-commits-view',
+	ShowSettingsPageAndJumpToSearchAndCompareView = 'gitlens.showSettingsPage#search-compare-view',
+	ShowSettingsPageAndJumpToStashesView = 'gitlens.showSettingsPage#stashes-view',
+	ShowSettingsPageAndJumpToTagsView = 'gitlens.showSettingsPage#tags-view',
+	ShowSettingsPageAndJumpToViews = 'gitlens.showSettingsPage#views',
+	ShowStashesView = 'gitlens.showStashesView',
+	ShowTagsView = 'gitlens.showTagsView',
 	ShowWelcomePage = 'gitlens.showWelcomePage',
+	ShowWelcomeView = 'gitlens.showWelcomeView',
 	StashApply = 'gitlens.stashApply',
-	StashDelete = 'gitlens.stashDelete',
 	StashSave = 'gitlens.stashSave',
 	StashSaveFiles = 'gitlens.stashSaveFiles',
 	SupportGitLens = 'gitlens.supportGitLens',
 	SwitchMode = 'gitlens.switchMode',
 	ToggleCodeLens = 'gitlens.toggleCodeLens',
 	ToggleFileBlame = 'gitlens.toggleFileBlame',
+	ToggleFileBlameInDiffLeft = 'gitlens.toggleFileBlameInDiffLeft',
+	ToggleFileBlameInDiffRight = 'gitlens.toggleFileBlameInDiffRight',
+	ToggleFileChanges = 'gitlens.toggleFileChanges',
 	ToggleFileHeatmap = 'gitlens.toggleFileHeatmap',
-	ToggleFileRecentChanges = 'gitlens.toggleFileRecentChanges',
+	ToggleFileHeatmapInDiffLeft = 'gitlens.toggleFileHeatmapInDiffLeft',
+	ToggleFileHeatmapInDiffRight = 'gitlens.toggleFileHeatmapInDiffRight',
 	ToggleLineBlame = 'gitlens.toggleLineBlame',
 	ToggleReviewMode = 'gitlens.toggleReviewMode',
 	ToggleZenMode = 'gitlens.toggleZenMode',
 	ViewsOpenDirectoryDiff = 'gitlens.views.openDirectoryDiff',
-	ViewsOpenDirectoryDiffWithWorking = 'gitlens.views.openDirectoryDiffWithWorking'
+	ViewsOpenDirectoryDiffWithWorking = 'gitlens.views.openDirectoryDiffWithWorking',
+
+	Deprecated_DiffHeadWith = 'gitlens.diffHeadWith',
+	Deprecated_DiffWorkingWith = 'gitlens.diffWorkingWith',
+	Deprecated_OpenBranchesInRemote = 'gitlens.openBranchesInRemote',
+	Deprecated_OpenBranchInRemote = 'gitlens.openBranchInRemote',
+	Deprecated_OpenCommitInRemote = 'gitlens.openCommitInRemote',
+	Deprecated_OpenFileInRemote = 'gitlens.openFileInRemote',
+	Deprecated_OpenInRemote = 'gitlens.openInRemote',
+	Deprecated_OpenRepoInRemote = 'gitlens.openRepoInRemote',
+}
+
+export function executeActionCommand<T extends ActionContext>(action: Action<T>, args: Omit<T, 'type'>) {
+	return commands.executeCommand(`${Commands.ActionPrefix}${action}`, { ...args, type: action });
+}
+
+export function getMarkdownActionCommand<T extends ActionContext>(action: Action<T>, args: Omit<T, 'type'>): string {
+	return Command.getMarkdownCommandArgsCore(`${Commands.ActionPrefix}${action}` as Commands, {
+		...args,
+		type: action,
+	});
+}
+
+export function executeCommand<T>(command: Commands, args: T) {
+	return commands.executeCommand(command, args);
+}
+
+export function executeEditorCommand<T>(command: Commands, uri: Uri | undefined, args: T) {
+	return commands.executeCommand(command, uri, args);
 }
 
 interface CommandConstructor {
@@ -135,65 +211,38 @@ export function registerCommands(context: ExtensionContext): void {
 }
 
 export function getCommandUri(uri?: Uri, editor?: TextEditor): Uri | undefined {
-	if (uri instanceof Uri) return uri;
-	if (editor == null) return undefined;
-
-	const document = editor.document;
-	if (document == null) return undefined;
-
-	return document.uri;
+	// Always use the editor.uri (if we have one), so we are correct for a split diff
+	return editor?.document?.uri ?? uri;
 }
 
-export async function getRepoPathOrActiveOrPrompt(
-	uri: Uri | undefined,
-	editor: TextEditor | undefined,
-	placeholder: string,
-	goBackCommand?: CommandQuickPickItem
-) {
-	let repoPath = await Container.git.getRepoPathOrActive(uri, editor);
-	if (!repoPath) {
-		const pick = await RepositoriesQuickPick.show(placeholder, goBackCommand);
-		if (pick instanceof CommandQuickPickItem) {
-			await pick.execute();
-			return undefined;
-		}
+export async function getRepoPathOrActiveOrPrompt(uri: Uri | undefined, editor: TextEditor | undefined, title: string) {
+	const repoPath = await Container.git.getRepoPathOrActive(uri, editor);
+	if (repoPath) return repoPath;
 
-		if (pick === undefined) {
-			if (goBackCommand !== undefined) {
-				await goBackCommand.execute();
-			}
-			return undefined;
-		}
-
-		repoPath = pick.repoPath;
+	const pick = await RepositoryPicker.show(title);
+	if (pick instanceof CommandQuickPickItem) {
+		await pick.execute();
+		return undefined;
 	}
-	return repoPath;
+
+	return pick?.repoPath;
 }
 
-export async function getRepoPathOrPrompt(placeholder: string, goBackCommand?: CommandQuickPickItem, uri?: Uri) {
-	let repoPath = await Container.git.getRepoPath(uri);
-	if (!repoPath) {
-		const pick = await RepositoriesQuickPick.show(placeholder, goBackCommand);
-		if (pick instanceof CommandQuickPickItem) {
-			await pick.execute();
-			return undefined;
-		}
+export async function getRepoPathOrPrompt(title: string, uri?: Uri) {
+	const repoPath = await Container.git.getRepoPath(uri);
+	if (repoPath) return repoPath;
 
-		if (pick === undefined) {
-			if (goBackCommand !== undefined) {
-				await goBackCommand.execute();
-			}
-			return undefined;
-		}
-
-		repoPath = pick.repoPath;
+	const pick = await RepositoryPicker.show(title);
+	if (pick instanceof CommandQuickPickItem) {
+		void (await pick.execute());
+		return undefined;
 	}
-	return repoPath;
+
+	return pick?.repoPath;
 }
 
 export interface CommandContextParsingOptions {
-	editor: boolean;
-	uri: boolean;
+	expectsEditor: boolean;
 }
 
 export interface CommandBaseContext {
@@ -202,154 +251,186 @@ export interface CommandBaseContext {
 	uri?: Uri;
 }
 
+export interface CommandGitTimelineItemContext extends CommandBaseContext {
+	readonly type: 'timeline-item:git';
+	readonly item: GitTimelineItem;
+	readonly uri: Uri;
+}
+
 export interface CommandScmGroupsContext extends CommandBaseContext {
-	type: 'scm-groups';
-	scmResourceGroups: SourceControlResourceGroup[];
+	readonly type: 'scm-groups';
+	readonly scmResourceGroups: SourceControlResourceGroup[];
 }
 
 export interface CommandScmStatesContext extends CommandBaseContext {
-	type: 'scm-states';
-	scmResourceStates: SourceControlResourceState[];
+	readonly type: 'scm-states';
+	readonly scmResourceStates: SourceControlResourceState[];
 }
 
 export interface CommandUnknownContext extends CommandBaseContext {
-	type: 'unknown';
+	readonly type: 'unknown';
 }
 
 export interface CommandUriContext extends CommandBaseContext {
-	type: 'uri';
+	readonly type: 'uri';
 }
 
 export interface CommandUrisContext extends CommandBaseContext {
-	type: 'uris';
-	uris: Uri[];
+	readonly type: 'uris';
+	readonly uris: Uri[];
 }
 
 // export interface CommandViewContext extends CommandBaseContext {
-//     type: 'view';
+//     readonly type: 'view';
 // }
 
-export interface CommandViewItemContext extends CommandBaseContext {
-	type: 'viewItem';
-	node: ViewNode;
+export interface CommandViewNodeContext extends CommandBaseContext {
+	readonly type: 'viewItem';
+	readonly node: ViewNode;
 }
 
-export function isCommandViewContextWithBranch(
-	context: CommandContext
-): context is CommandViewItemContext & { node: ViewNode & { branch: GitBranch } } {
+export function isCommandContextGitTimelineItem(context: CommandContext): context is CommandGitTimelineItemContext {
+	return context.type === 'timeline-item:git';
+}
+
+export function isCommandContextViewNodeHasBranch(
+	context: CommandContext,
+): context is CommandViewNodeContext & { node: ViewNode & { branch: GitBranch } } {
 	if (context.type !== 'viewItem') return false;
 
 	return GitBranch.is((context.node as ViewNode & { branch: GitBranch }).branch);
 }
 
-export function isCommandViewContextWithCommit<T extends GitCommit>(
-	context: CommandContext
-): context is CommandViewItemContext & { node: ViewNode & { commit: T } } {
+export function isCommandContextViewNodeHasCommit<T extends GitCommit>(
+	context: CommandContext,
+): context is CommandViewNodeContext & { node: ViewNode & { commit: T } } {
 	if (context.type !== 'viewItem') return false;
 
 	return GitCommit.is((context.node as ViewNode & { commit: GitCommit }).commit);
 }
 
-export function isCommandViewContextWithContributor(
-	context: CommandContext
-): context is CommandViewItemContext & { node: ViewNode & { contributor: GitContributor } } {
+export function isCommandContextViewNodeHasContributor(
+	context: CommandContext,
+): context is CommandViewNodeContext & { node: ViewNode & { contributor: GitContributor } } {
 	if (context.type !== 'viewItem') return false;
 
 	return GitContributor.is((context.node as ViewNode & { contributor: GitContributor }).contributor);
 }
 
-export function isCommandViewContextWithFile(
-	context: CommandContext
-): context is CommandViewItemContext & { node: ViewNode & { file: GitFile; repoPath: string } } {
+export function isCommandContextViewNodeHasFile(
+	context: CommandContext,
+): context is CommandViewNodeContext & { node: ViewNode & { file: GitFile; repoPath: string } } {
 	if (context.type !== 'viewItem') return false;
 
 	const node = context.node as ViewNode & { file: GitFile; repoPath: string };
-	return node.file !== undefined && (node.file.repoPath !== undefined || node.repoPath !== undefined);
+	return node.file != null && (node.file.repoPath != null || node.repoPath != null);
 }
 
-export function isCommandViewContextWithFileCommit(
-	context: CommandContext
-): context is CommandViewItemContext & { node: ViewNode & { commit: GitCommit; file: GitFile; repoPath: string } } {
+export function isCommandContextViewNodeHasFileCommit(
+	context: CommandContext,
+): context is CommandViewNodeContext & { node: ViewNode & { commit: GitCommit; file: GitFile; repoPath: string } } {
 	if (context.type !== 'viewItem') return false;
 
 	const node = context.node as ViewNode & { commit: GitCommit; file: GitFile; repoPath: string };
-	return (
-		node.file !== undefined &&
-		GitCommit.is(node.commit) &&
-		(node.file.repoPath !== undefined || node.repoPath !== undefined)
-	);
+	return node.file != null && GitCommit.is(node.commit) && (node.file.repoPath != null || node.repoPath != null);
 }
 
-export function isCommandViewContextWithFileRefs(
-	context: CommandContext
-): context is CommandViewItemContext & {
+export function isCommandContextViewNodeHasFileRefs(
+	context: CommandContext,
+): context is CommandViewNodeContext & {
 	node: ViewNode & { file: GitFile; ref1: string; ref2: string; repoPath: string };
 } {
 	if (context.type !== 'viewItem') return false;
 
 	const node = context.node as ViewNode & { file: GitFile; ref1: string; ref2: string; repoPath: string };
 	return (
-		node.file !== undefined &&
-		node.ref1 !== undefined &&
-		node.ref2 !== undefined &&
-		(node.file.repoPath !== undefined || node.repoPath !== undefined)
+		node.file != null &&
+		node.ref1 != null &&
+		node.ref2 != null &&
+		(node.file.repoPath != null || node.repoPath != null)
 	);
 }
 
-export function isCommandViewContextWithRef(
-	context: CommandContext
-): context is CommandViewItemContext & { node: ViewNode & { ref: string } } {
+export function isCommandContextViewNodeHasRef(
+	context: CommandContext,
+): context is CommandViewNodeContext & { node: ViewNode & { ref: GitReference } } {
 	return context.type === 'viewItem' && context.node instanceof ViewRefNode;
 }
 
-export function isCommandViewContextWithRemote(
-	context: CommandContext
-): context is CommandViewItemContext & { node: ViewNode & { remote: GitRemote } } {
+export function isCommandContextViewNodeHasRemote(
+	context: CommandContext,
+): context is CommandViewNodeContext & { node: ViewNode & { remote: GitRemote } } {
 	if (context.type !== 'viewItem') return false;
 
 	return GitRemote.is((context.node as ViewNode & { remote: GitRemote }).remote);
 }
 
-export function isCommandViewContextWithRepo(
-	context: CommandContext
-): context is CommandViewItemContext & { node: ViewNode & { repo: Repository } } {
+export function isCommandContextViewNodeHasRepository(
+	context: CommandContext,
+): context is CommandViewNodeContext & { node: ViewNode & { repo: Repository } } {
 	if (context.type !== 'viewItem') return false;
 
 	return (context.node as ViewNode & { repo?: Repository }).repo instanceof Repository;
 }
 
-export function isCommandViewContextWithRepoPath(
-	context: CommandContext
-): context is CommandViewItemContext & { node: ViewNode & { repoPath: string } } {
+export function isCommandContextViewNodeHasRepoPath(
+	context: CommandContext,
+): context is CommandViewNodeContext & { node: ViewNode & { repoPath: string } } {
 	if (context.type !== 'viewItem') return false;
 
 	return typeof (context.node as ViewNode & { repoPath?: string }).repoPath === 'string';
 }
 
+export function isCommandContextViewNodeHasTag(
+	context: CommandContext,
+): context is CommandViewNodeContext & { node: ViewNode & { tag: GitTag } } {
+	if (context.type !== 'viewItem') return false;
+
+	return GitTag.is((context.node as ViewNode & { tag: GitTag }).tag);
+}
+
 export type CommandContext =
+	| CommandGitTimelineItemContext
 	| CommandScmGroupsContext
 	| CommandScmStatesContext
 	| CommandUnknownContext
 	| CommandUriContext
 	| CommandUrisContext
 	// | CommandViewContext
-	| CommandViewItemContext;
+	| CommandViewNodeContext;
 
 function isScmResourceGroup(group: any): group is SourceControlResourceGroup {
 	if (group == null) return false;
 
 	return (
-		(group as SourceControlResourceGroup).id !== undefined &&
-		(group.handle !== undefined ||
-			(group as SourceControlResourceGroup).label !== undefined ||
-			(group as SourceControlResourceGroup).resourceStates !== undefined)
+		(group as SourceControlResourceGroup).id != null &&
+		(group as SourceControlResourceGroup).label != null &&
+		(group as SourceControlResourceGroup).resourceStates != null &&
+		Array.isArray((group as SourceControlResourceGroup).resourceStates)
 	);
 }
 
-function isScmResourceState(state: any): state is SourceControlResourceState {
-	if (state == null) return false;
+function isScmResourceState(resource: any): resource is SourceControlResourceState {
+	if (resource == null) return false;
 
-	return (state as SourceControlResourceState).resourceUri != null;
+	return (resource as SourceControlResourceState).resourceUri != null;
+}
+
+function isTimelineItem(item: any): item is TimelineItem {
+	if (item == null) return false;
+
+	return (item as TimelineItem).timestamp != null && (item as TimelineItem).label != null;
+}
+
+function isGitTimelineItem(item: any): item is GitTimelineItem {
+	if (item == null) return false;
+
+	return (
+		isTimelineItem(item) &&
+		(item as GitTimelineItem).ref != null &&
+		(item as GitTimelineItem).previousRef != null &&
+		(item as GitTimelineItem).message != null
+	);
 }
 
 export abstract class Command implements Disposable {
@@ -357,29 +438,29 @@ export abstract class Command implements Disposable {
 		return `command:${command}?${encodeURIComponent(JSON.stringify(args))}`;
 	}
 
-	protected readonly contextParsingOptions: CommandContextParsingOptions = { editor: false, uri: false };
+	protected readonly contextParsingOptions: CommandContextParsingOptions = { expectsEditor: false };
 
-	private _disposable: Disposable;
+	private readonly _disposable: Disposable;
 
 	constructor(command: Commands | Commands[]) {
 		if (typeof command === 'string') {
 			this._disposable = commands.registerCommand(
 				command,
 				(...args: any[]) => this._execute(command, ...args),
-				this
+				this,
 			);
 
 			return;
 		}
 
 		const subscriptions = command.map(cmd =>
-			commands.registerCommand(cmd, (...args: any[]) => this._execute(cmd, ...args), this)
+			commands.registerCommand(cmd, (...args: any[]) => this._execute(cmd, ...args), this),
 		);
 		this._disposable = Disposable.from(...subscriptions);
 	}
 
 	dispose() {
-		this._disposable && this._disposable.dispose();
+		this._disposable.dispose();
 	}
 
 	protected preExecute(context: CommandContext, ...args: any[]): Promise<any> {
@@ -389,8 +470,6 @@ export abstract class Command implements Disposable {
 	abstract execute(...args: any[]): any;
 
 	protected _execute(command: string, ...args: any[]): any {
-		// Telemetry.trackEvent(command);
-
 		const [context, rest] = Command.parseContext(command, { ...this.contextParsingOptions }, ...args);
 		return this.preExecute(context, ...rest);
 	}
@@ -404,26 +483,40 @@ export abstract class Command implements Disposable {
 
 		let firstArg = args[0];
 
-		if (
-			options.editor &&
-			(firstArg == null || (firstArg.id != null && firstArg.document != null && firstArg.document.uri != null))
-		) {
-			editor = firstArg;
-			args = args.slice(1);
-			firstArg = args[0];
-		}
-
-		if (options.uri && (firstArg == null || firstArg instanceof Uri)) {
-			const [uri, ...rest] = args as [Uri, any];
-			if (uri !== undefined) {
-				const uris = rest[0];
-				if (uris != null && Array.isArray(uris) && uris.length !== 0 && uris[0] instanceof Uri) {
-					return [{ command: command, type: 'uris', editor: editor, uri: uri, uris: uris }, rest.slice(1)];
-				}
-				return [{ command: command, type: 'uri', editor: editor, uri: uri }, rest];
+		if (options.expectsEditor) {
+			if (firstArg == null || (firstArg.id != null && firstArg.document?.uri != null)) {
+				editor = firstArg;
+				args = args.slice(1);
+				firstArg = args[0];
 			}
 
-			args = args.slice(1);
+			if (args.length > 0 && (firstArg == null || firstArg instanceof Uri)) {
+				const [uri, ...rest] = args as [Uri, any];
+				if (uri != null) {
+					// If the uri matches the active editor (or we are in a left-hand side of a diff), then pass the active editor
+					if (
+						editor == null &&
+						(uri.toString() === window.activeTextEditor?.document.uri.toString() ||
+							command.endsWith('InDiffLeft'))
+					) {
+						editor = window.activeTextEditor;
+					}
+
+					const uris = rest[0];
+					if (uris != null && Array.isArray(uris) && uris.length !== 0 && uris[0] instanceof Uri) {
+						return [
+							{ command: command, type: 'uris', editor: editor, uri: uri, uris: uris },
+							rest.slice(1),
+						];
+					}
+					return [{ command: command, type: 'uri', editor: editor, uri: uri }, rest];
+				}
+
+				args = args.slice(1);
+			} else if (editor == null) {
+				// If we are expecting an editor and we have no uri, then pass the active editor
+				editor = window.activeTextEditor;
+			}
 		}
 
 		if (firstArg instanceof ViewNode) {
@@ -443,7 +536,7 @@ export abstract class Command implements Disposable {
 
 			return [
 				{ command: command, type: 'scm-states', scmResourceStates: states, uri: states[0].resourceUri },
-				args.slice(count)
+				args.slice(count),
 			];
 		}
 
@@ -460,12 +553,17 @@ export abstract class Command implements Disposable {
 			return [{ command: command, type: 'scm-groups', scmResourceGroups: groups }, args.slice(count)];
 		}
 
-		return [{ command: command, type: 'unknown', editor: editor }, args];
+		if (isGitTimelineItem(firstArg)) {
+			const [item, uri, ...rest] = args as [GitTimelineItem, Uri, any];
+			return [{ command: command, type: 'timeline-item:git', item: item, uri: uri }, rest];
+		}
+
+		return [{ command: command, type: 'unknown', editor: editor, uri: editor?.document.uri }, args];
 	}
 }
 
 export abstract class ActiveEditorCommand extends Command {
-	protected readonly contextParsingOptions: CommandContextParsingOptions = { editor: true, uri: true };
+	protected readonly contextParsingOptions: CommandContextParsingOptions = { expectsEditor: true };
 
 	constructor(command: Commands | Commands[]) {
 		super(command);
@@ -476,7 +574,7 @@ export abstract class ActiveEditorCommand extends Command {
 	}
 
 	protected _execute(command: string, ...args: any[]): any {
-		return super._execute(command, window.activeTextEditor, ...args);
+		return super._execute(command, undefined, ...args);
 	}
 
 	abstract execute(editor?: TextEditor, ...args: any[]): any;
@@ -495,7 +593,7 @@ export abstract class ActiveEditorCachedCommand extends ActiveEditorCommand {
 	protected _execute(command: string, ...args: any[]): any {
 		lastCommand = {
 			command: command,
-			args: args
+			args: args,
 		};
 		return super._execute(command, ...args);
 	}
@@ -504,7 +602,7 @@ export abstract class ActiveEditorCachedCommand extends ActiveEditorCommand {
 }
 
 export abstract class EditorCommand implements Disposable {
-	private _disposable: Disposable;
+	private readonly _disposable: Disposable;
 
 	constructor(command: Commands | Commands[]) {
 		if (!Array.isArray(command)) {
@@ -518,80 +616,72 @@ export abstract class EditorCommand implements Disposable {
 					cmd,
 					(editor: TextEditor, edit: TextEditorEdit, ...args: any[]) =>
 						this.executeCore(cmd, editor, edit, ...args),
-					this
-				)
+					this,
+				),
 			);
 		}
 		this._disposable = Disposable.from(...subscriptions);
 	}
 
 	dispose() {
-		this._disposable && this._disposable.dispose();
+		this._disposable.dispose();
 	}
 
 	private executeCore(command: string, editor: TextEditor, edit: TextEditorEdit, ...args: any[]): any {
-		// Telemetry.trackEvent(command);
 		return this.execute(editor, edit, ...args);
 	}
 
 	abstract execute(editor: TextEditor, edit: TextEditorEdit, ...args: any[]): any;
 }
 
-export function findEditor(uri: Uri, lastActive?: TextEditor): TextEditor | undefined {
-	const normalizedUri = uri.toString(false);
+export function findEditor(uri: Uri): TextEditor | undefined {
+	const active = window.activeTextEditor;
+	const normalizedUri = uri.toString();
 
-	let e = window.activeTextEditor;
-	if (e !== undefined && e.document.uri.toString(false) === normalizedUri) {
-		return e;
-	}
-
-	let found;
-	for (e of window.visibleTextEditors) {
-		// Prioritize the last active window over other visible ones
-		if (e === lastActive && e.document.uri.toString(false) === normalizedUri) {
+	for (const e of [...(active != null ? [active] : []), ...window.visibleTextEditors]) {
+		// Don't include diff editors
+		if (e.document.uri.toString() === normalizedUri && e?.viewColumn != null) {
 			return e;
 		}
-
-		if (e.document.uri.toString(false) === normalizedUri) {
-			found = e;
-		}
 	}
 
-	return found;
+	return undefined;
 }
 
 export async function findOrOpenEditor(
 	uri: Uri,
-	options: TextDocumentShowOptions & { rethrow?: boolean } = {},
-	lastActive?: TextEditor
+	options?: TextDocumentShowOptions & { throwOnError?: boolean },
 ): Promise<TextEditor | undefined> {
-	const e = findEditor(uri, lastActive);
-	if (e !== undefined) {
-		if (!options.preserveFocus) {
+	const e = findEditor(uri);
+	if (e != null) {
+		if (!options?.preserveFocus) {
 			await window.showTextDocument(e.document, { ...options, viewColumn: e.viewColumn });
 		}
 
 		return e;
 	}
 
-	let column = window.activeTextEditor?.viewColumn;
+	return openEditor(uri, { viewColumn: window.activeTextEditor?.viewColumn, ...options });
+}
 
-	// If we have a last active view column and it isn't the same as the webview's, then use it
-	if (lastActive !== undefined && lastActive.viewColumn !== undefined && lastActive.viewColumn !== column) {
-		column = lastActive.viewColumn;
-	} else if (column !== undefined) {
-		column--;
-		if (column <= 0) {
-			column = undefined;
+export function findOrOpenEditors(uris: Uri[]): void {
+	const normalizedUris = new Map(uris.map(uri => [uri.toString(), uri]));
+
+	for (const e of window.visibleTextEditors) {
+		// Don't include diff editors
+		if (e?.viewColumn != null) {
+			normalizedUris.delete(e.document.uri.toString());
 		}
 	}
 
-	return openEditor(uri, { viewColumn: column, ...options });
+	for (const uri of normalizedUris.values()) {
+		void commands.executeCommand(BuiltInCommands.Open, uri, { background: true, preview: false });
+	}
 }
 
 export async function openEditor(
 	uri: Uri,
-	options: TextDocumentShowOptions & { rethrow?: boolean } = {}
+	options: TextDocumentShowOptions & { rethrow?: boolean } = {},
 ): Promise<TextEditor | undefined> {
 	const { rethrow, ...opts } = options;
 	try {
@@ -610,10 +700,10 @@ export async function openEditor(
 			preserveFocus: false,
 			preview: true,
 			viewColumn: ViewColumn.Active,
-			...opts
+			...opts,
 		});
 	} catch (ex) {
-		const msg = ex.toString();
+		const msg: string = ex?.toString() ?? '';
 		if (msg.includes('File seems to be binary and cannot be opened as text')) {
 			await commands.executeCommand(BuiltInCommands.Open, uri);
 
@@ -629,14 +719,14 @@ export async function openEditor(
 
 export function openWorkspace(uri: Uri, name: string, options: { openInNewWindow?: boolean } = {}) {
 	if (options.openInNewWindow) {
-		commands.executeCommand(BuiltInCommands.OpenFolder, uri, true);
+		void commands.executeCommand(BuiltInCommands.OpenFolder, uri, true);
 
 		return true;
 	}
 
 	return workspace.updateWorkspaceFolders(
-		workspace.workspaceFolders !== undefined ? workspace.workspaceFolders.length : 0,
+		workspace.workspaceFolders != null ? workspace.workspaceFolders.length : 0,
 		null,
-		{ uri: uri, name: name }
+		{ uri: uri, name: name },
 	);
 }

@@ -13,7 +13,7 @@ import {
 	RepositoriesInFolderRequest,
 	RepositoriesInFolderRequestType,
 	RepositoriesInFolderResponse,
-	RequestType
+	RequestType,
 } from './protocol';
 import { vslsUriRootRegex } from './vsls';
 
@@ -41,7 +41,7 @@ const gitWhitelist = new Map<string, (args: any[]) => boolean>([
 	['stash', args => args[1] === 'list'],
 	['status', defaultWhitelistFn],
 	['symbolic-ref', defaultWhitelistFn],
-	['tag', args => args[1] === '-l']
+	['tag', args => args[1] === '-l'],
 ]);
 
 const leadingSlashRegex = /^[/|\\]/;
@@ -83,20 +83,20 @@ export class VslsHostService implements Disposable {
 
 	private onRequest<TRequest, TResponse>(
 		requestType: RequestType<TRequest, TResponse>,
-		handler: (request: TRequest, cancellation: CancellationToken) => Promise<TResponse>
+		handler: (request: TRequest, cancellation: CancellationToken) => Promise<TResponse>,
 	) {
 		this._service.onRequest(requestType.name, (args: any[], cancellation: CancellationToken) =>
-			handler(args[0], cancellation)
+			handler(args[0], cancellation),
 		);
 	}
 
 	@log()
-	private onAvailabilityChanged(available: boolean) {
+	private onAvailabilityChanged(_available: boolean) {
 		// TODO
 	}
 
 	@debug()
-	private onWorkspaceFoldersChanged(e?: WorkspaceFoldersChangeEvent) {
+	private onWorkspaceFoldersChanged(_e?: WorkspaceFoldersChangeEvent) {
 		if (workspace.workspaceFolders === undefined || workspace.workspaceFolders.length === 0) return;
 
 		const cc = Logger.getCorrelationContext();
@@ -127,7 +127,7 @@ export class VslsHostService implements Disposable {
 	@log()
 	private async onGitCommandRequest(
 		request: GitCommandRequest,
-		cancellation: CancellationToken
+		_cancellation: CancellationToken,
 	): Promise<GitCommandResponse> {
 		const { options, args } = request;
 
@@ -137,7 +137,7 @@ export class VslsHostService implements Disposable {
 		let isRootWorkspace = false;
 		if (options.cwd !== undefined && options.cwd.length > 0 && this._sharedToLocalPaths !== undefined) {
 			// This is all so ugly, but basically we are converting shared paths to local paths
-			if (this._sharedPathsRegex !== undefined && this._sharedPathsRegex.test(options.cwd)) {
+			if (this._sharedPathsRegex?.test(options.cwd)) {
 				options.cwd = Strings.normalizePath(options.cwd).replace(this._sharedPathsRegex, (match, shared) => {
 					if (!isRootWorkspace) {
 						isRootWorkspace = shared === '/~0';
@@ -172,14 +172,14 @@ export class VslsHostService implements Disposable {
 					args.splice(i, 1, arg.substr(1));
 				}
 
-				if (this._sharedPathsRegex !== undefined && this._sharedPathsRegex.test(arg)) {
+				if (this._sharedPathsRegex?.test(arg)) {
 					args.splice(
 						i,
 						1,
 						Strings.normalizePath(arg).replace(this._sharedPathsRegex, (match, shared) => {
 							const local = this._sharedToLocalPaths.get(shared);
 							return local != null ? local : shared;
-						})
+						}),
 					);
 				}
 			}
@@ -204,7 +204,7 @@ export class VslsHostService implements Disposable {
 	@log()
 	private async onRepositoriesInFolderRequest(
 		request: RepositoriesInFolderRequest,
-		cancellation: CancellationToken
+		_cancellation: CancellationToken,
 	): Promise<RepositoriesInFolderResponse> {
 		const uri = this.convertSharedUriToLocal(Uri.parse(request.folderUri));
 		const normalized = Strings.normalizePath(uri.fsPath, { stripTrailingSlash: true }).toLowerCase();
@@ -218,18 +218,18 @@ export class VslsHostService implements Disposable {
 					folderUri: vslsUri.toString(true),
 					path: vslsUri.path,
 					root: r.root,
-					closed: r.closed
+					closed: r.closed,
 				};
-			})
+			}),
 		];
 
 		return {
-			repositories: repos
+			repositories: repos,
 		};
 	}
 
 	@debug({
-		exit: result => `returned ${result.toString(true)}`
+		exit: result => `returned ${result.toString(true)}`,
 	})
 	private convertLocalUriToShared(localUri: Uri) {
 		const cc = Logger.getCorrelationContext();
@@ -237,7 +237,7 @@ export class VslsHostService implements Disposable {
 		let sharedUri = this._api.convertLocalUriToShared(localUri);
 		Logger.debug(
 			cc,
-			`LiveShare.convertLocalUriToShared(${localUri.toString(true)}) returned ${sharedUri.toString(true)}`
+			`LiveShare.convertLocalUriToShared(${localUri.toString(true)}) returned ${sharedUri.toString(true)}`,
 		);
 
 		const localPath = localUri.path;

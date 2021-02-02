@@ -1,9 +1,11 @@
 'use strict';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as paths from 'path';
 import {
 	ConfigurationChangeEvent,
 	Disposable,
+	env,
 	Event,
 	EventEmitter,
 	Extension,
@@ -16,19 +18,16 @@ import {
 	WindowState,
 	workspace,
 	WorkspaceFolder,
-	WorkspaceFoldersChangeEvent
+	WorkspaceFoldersChangeEvent,
 } from 'vscode';
-// eslint-disable-next-line import/no-unresolved
-import { API as BuiltInGitApi, GitExtension } from '../@types/git';
-import { configuration } from '../configuration';
-import { CommandContext, DocumentSchemes, setCommandContext } from '../constants';
+import { API as BuiltInGitApi, Repository as BuiltInGitRepository, GitExtension } from '../@types/git';
+import { resetAvatarCache } from '../avatars';
+import { BranchSorting, configuration, TagSorting } from '../configuration';
+import { ContextKeys, DocumentSchemes, GlyphChars, setContext } from '../constants';
 import { Container } from '../container';
-import { LogCorrelationContext, Logger } from '../logger';
-import { Messages } from '../messages';
-import { Arrays, debug, gate, Iterables, log, Objects, Strings, TernarySearchTree, Versions } from '../system';
-import { CachedBlame, CachedDiff, CachedLog, GitDocumentState, TrackedDocument } from '../trackers/gitDocumentTracker';
-import { vslsUriPrefixRegex } from '../vsls/vsls';
+import { setEnabled } from '../extension';
 import {
+	Authentication,
 	BranchDateFormatting,
 	CommitDateFormatting,
 	Git,
@@ -40,10 +39,11 @@ import {
 	GitBlameParser,
 	GitBranch,
 	GitBranchParser,
-	GitCommit,
+	GitBranchReference,
 	GitCommitType,
 	GitContributor,
 	GitDiff,
+	GitDiffFilter,
 	GitDiffHunkLine,
 	GitDiffParser,
 	GitDiffShortStat,
@@ -51,11 +51,14 @@ import {
 	GitFile,
 	GitLog,
 	GitLogCommit,
-	GitLogDiffFilter,
 	GitLogParser,
+	GitMergeStatus,
+	GitRebaseStatus,
+	GitReference,
 	GitReflog,
 	GitRemote,
 	GitRemoteParser,
+	GitRevision,
 	GitStash,
 	GitStashParser,
 	GitStatus,
@@ -65,104 +68,60 @@ import {
 	GitTagParser,
 	GitTree,
 	GitTreeParser,
+	maxGitCliLength,
+	PullRequest,
+	PullRequestDateFormatting,
+	PullRequestState,
 	Repository,
 	RepositoryChange,
-	RepositoryChangeEvent
+	RepositoryChangeComparisonMode,
+	RepositoryChangeEvent,
+	SearchPattern,
 } from './git';
 import { GitUri } from './gitUri';
-import { RemoteProviderFactory, RemoteProviders } from './remotes/factory';
+import { LogCorrelationContext, Logger } from '../logger';
+import { Messages } from '../messages';
 import { GitReflogParser, GitShortLogParser } from './parsers/parsers';
-import { isWindows } from './shell';
-
-export * from './gitUri';
-export * from './models/models';
-export * from './formatters/formatters';
-export * from './remotes/provider';
-export { RemoteProviderFactory } from './remotes/factory';
+import { RemoteProvider, RemoteProviderFactory, RemoteProviders, RichRemoteProvider } from './remotes/factory';
+import { fsExists, isWindows } from './shell';
+import {
+	Arrays,
+	debug,
+	Functions,
+	gate,
+	Iterables,
+	log,
+	Objects,
+	Promises,
+	Strings,
+	TernarySearchTree,
+	Versions,
+} from '../system';
+import { CachedBlame, CachedDiff, CachedLog, GitDocumentState, TrackedDocument } from '../trackers/gitDocumentTracker';
+import { vslsUriPrefixRegex } from '../vsls/vsls';
 
 const emptyStr = '';
 const slash = '/';
 
 const RepoSearchWarnings = {
-	doesNotExist: /no such file or directory/i
+	doesNotExist: /no such file or directory/i,
 };
 
 const doubleQuoteRegex = /"/g;
+const driveLetterRegex = /(?<=^\/?)([a-zA-Z])(?=:\/)/;
 const userConfigRegex = /^user\.(name|email) (.*)$/gm;
 const mappedAuthorRegex = /(.+)\s<(.+)>/;
-const searchMessageOperationRegex = /(?=(.*?)\s?(?:(?:=:|message:|@:|author:|#:|commit:|\?:|file:|~:|change:)|$))/;
-const searchMessageValuesRegex = /(".+"|[^\b\s]+)/g;
-const searchOperationRegex = /((?:=|message|@|author|#|commit|\?|file|~|change):)\s?(?=(.*?)\s?(?:(?:=:|message:|@:|author:|#:|commit:|\?:|file:|~:|change:)|$))/g;
 
 const emptyPromise: Promise<GitBlame | GitDiff | GitLog | undefined> = Promise.resolve(undefined);
 const reflogCommands = ['merge', 'pull'];
 
-export type SearchOperators =
-	| ''
-	| '=:'
-	| 'message:'
-	| '@:'
-	| 'author:'
-	| '#:'
-	| 'commit:'
-	| '?:'
-	| 'file:'
-	| '~:'
-	| 'change:';
-
-export const searchOperators = new Set<string>([
-	'',
-	'=:',
-	'message:',
-	'@:',
-	'author:',
-	'#:',
-	'commit:',
-	'?:',
-	'file:',
-	'~:',
-	'change:'
-]);
-
-export interface SearchPattern {
-	pattern: string;
-	matchAll?: boolean;
-	matchCase?: boolean;
-	matchRegex?: boolean;
-}
-
-export namespace SearchPattern {
-	export function fromCommit(ref: string): string;
-	export function fromCommit(commit: GitCommit): string;
-	export function fromCommit(refOrCommit: string | GitCommit) {
-		return `#:${GitService.shortenSha(typeof refOrCommit === 'string' ? refOrCommit : refOrCommit.sha)}`;
-	}
-
-	export function fromCommits(refs: string[]): string;
-	export function fromCommits(commits: GitCommit[]): string;
-	export function fromCommits(refsOrCommits: (string | GitCommit)[]) {
-		return refsOrCommits.map(r => `#:${GitService.shortenSha(typeof r === 'string' ? r : r.sha)}`).join(' ');
-	}
-
-	export function toKey(search: SearchPattern) {
-		return `${search.pattern}|${search.matchAll ? 'A' : ''}${search.matchCase ? 'C' : ''}${
-			search.matchRegex ? 'R' : ''
-		}`;
-	}
-}
-
-const normalizeSearchOperatorsMap = new Map<SearchOperators, SearchOperators>([
-	['', 'message:'],
-	['=:', 'message:'],
-	['message:', 'message:'],
-	['@:', 'author:'],
-	['author:', 'author:'],
-	['#:', 'commit:'],
-	['commit:', 'commit:'],
-	['?:', 'file:'],
-	['file:', 'file:'],
-	['~:', 'change:'],
-	['change:', 'change:']
+const maxDefaultBranchWeight = 100;
+const weightedDefaultBranches = new Map<string, number>([
+	['master', maxDefaultBranchWeight],
+	['main', 15],
+	['default', 10],
+	['develop', 5],
+	['development', 1],
 ]);
 
 export class GitService implements Disposable {
@@ -172,11 +131,15 @@ export class GitService implements Disposable {
 	}
 
 	private readonly _disposable: Disposable;
-	private readonly _repositoryTree: TernarySearchTree<Repository>;
+	private readonly _repositoryTree: TernarySearchTree<string, Repository>;
 	private _repositoriesLoadingPromise: Promise<void> | undefined;
-	private _suspended: boolean = false;
 
 	private readonly _branchesCache = new Map<string, GitBranch[]>();
+	private readonly _contributorsCache = new Map<string, GitContributor[]>();
+	private readonly _mergeStatusCache = new Map<string, GitMergeStatus | null>();
+	private readonly _rebaseStatusCache = new Map<string, GitRebaseStatus | null>();
+	private readonly _remotesWithApiProviderCache = new Map<string, GitRemote<RichRemoteProvider> | null>();
+	private readonly _stashesCache = new Map<string, GitStash | null>();
 	private readonly _tagsCache = new Map<string, GitTag[]>();
 	private readonly _trackedCache = new Map<string, boolean | Promise<boolean>>();
 	private readonly _userMapCache = new Map<string, { name?: string; email?: string } | null>();
@@ -187,7 +150,14 @@ export class GitService implements Disposable {
 		this._disposable = Disposable.from(
 			window.onDidChangeWindowState(this.onWindowStateChanged, this),
 			workspace.onDidChangeWorkspaceFolders(this.onWorkspaceFoldersChanged, this),
-			configuration.onDidChange(this.onConfigurationChanged, this)
+			configuration.onDidChange(this.onConfigurationChanged, this),
+			Authentication.onDidChange(e => {
+				if (e.reason === 'connected') {
+					resetAvatarCache('failed');
+				}
+				this._remotesWithApiProviderCache.clear();
+				void this.updateContext(this._repositoryTree);
+			}),
 		);
 		this.onConfigurationChanged(configuration.initializingChangeEvent);
 
@@ -196,12 +166,8 @@ export class GitService implements Disposable {
 
 	dispose() {
 		this._repositoryTree.forEach(r => r.dispose());
-		this._branchesCache.clear();
-		this._tagsCache.clear();
-		this._trackedCache.clear();
-		this._userMapCache.clear();
-
-		this._disposable && this._disposable.dispose();
+		void this.resetCaches();
+		this._disposable.dispose();
 	}
 
 	@log()
@@ -209,11 +175,11 @@ export class GitService implements Disposable {
 		// Try to use the same git as the built-in vscode git extension
 		let gitPath;
 		const gitApi = await GitService.getBuiltInGitApi();
-		if (gitApi !== undefined) {
+		if (gitApi != null) {
 			gitPath = gitApi.git.path;
 		}
 
-		await Git.setOrFindGitPath(gitPath || configuration.getAny<string>('git.path'));
+		await Git.setOrFindGitPath(gitPath ?? configuration.getAny<string | string[]>('git.path'));
 	}
 
 	get readonly() {
@@ -225,17 +191,40 @@ export class GitService implements Disposable {
 	}
 
 	private onAnyRepositoryChanged(repo: Repository, e: RepositoryChangeEvent) {
-		if (e.changed(RepositoryChange.Stashes, true)) return;
-
-		this._branchesCache.delete(repo.path);
-		this._tagsCache.delete(repo.path);
-		this._trackedCache.clear();
-
-		if (e.changed(RepositoryChange.Config)) {
+		if (e.changed(RepositoryChange.Config, RepositoryChangeComparisonMode.Any)) {
 			this._userMapCache.delete(repo.path);
 		}
 
-		if (e.changed(RepositoryChange.Closed)) {
+		if (e.changed(RepositoryChange.Heads, RepositoryChange.Remotes, RepositoryChangeComparisonMode.Any)) {
+			this._branchesCache.delete(repo.path);
+			this._contributorsCache.delete(repo.path);
+
+			if (e.changed(RepositoryChange.Remotes, RepositoryChangeComparisonMode.Any)) {
+				this._remotesWithApiProviderCache.clear();
+			}
+		}
+
+		if (e.changed(RepositoryChange.Index, RepositoryChange.Unknown, RepositoryChangeComparisonMode.Any)) {
+			this._trackedCache.clear();
+		}
+
+		if (e.changed(RepositoryChange.Merge, RepositoryChangeComparisonMode.Any)) {
+			this._mergeStatusCache.delete(repo.path);
+		}
+
+		if (e.changed(RepositoryChange.Rebase, RepositoryChangeComparisonMode.Any)) {
+			this._rebaseStatusCache.delete(repo.path);
+		}
+
+		if (e.changed(RepositoryChange.Stash, RepositoryChangeComparisonMode.Any)) {
+			this._stashesCache.delete(repo.path);
+		}
+
+		if (e.changed(RepositoryChange.Tags, RepositoryChangeComparisonMode.Any)) {
+			this._tagsCache.delete(repo.path);
+		}
+
+		if (e.changed(RepositoryChange.Closed, RepositoryChangeComparisonMode.Any)) {
 			// Send a notification that the repositories changed
 			setImmediate(async () => {
 				await this.updateContext(this._repositoryTree);
@@ -253,26 +242,26 @@ export class GitService implements Disposable {
 		) {
 			BranchDateFormatting.reset();
 			CommitDateFormatting.reset();
+			PullRequestDateFormatting.reset();
 		}
 	}
 
+	@debug()
 	private onWindowStateChanged(e: WindowState) {
 		if (e.focused) {
 			this._repositoryTree.forEach(r => r.resume());
 		} else {
 			this._repositoryTree.forEach(r => r.suspend());
 		}
-
-		this._suspended = !e.focused;
 	}
 
 	private async onWorkspaceFoldersChanged(e?: WorkspaceFoldersChangeEvent) {
 		let initializing = false;
-		if (e === undefined) {
+		if (e == null) {
 			initializing = true;
 			e = {
-				added: workspace.workspaceFolders || [],
-				removed: []
+				added: workspace.workspaceFolders ?? [],
+				removed: [],
 			};
 
 			Logger.log(`Starting repository search in ${e.added.length} folders`);
@@ -285,13 +274,15 @@ export class GitService implements Disposable {
 			if (scheme === DocumentSchemes.Vsls) {
 				if (Container.vsls.isMaybeGuest) {
 					const guest = await Container.vsls.guest();
-					if (guest !== undefined) {
+					if (guest != null) {
 						const repositories = await guest.getRepositoriesInFolder(
 							f,
-							this.onAnyRepositoryChanged.bind(this)
+							this.onAnyRepositoryChanged.bind(this),
 						);
 						for (const r of repositories) {
-							this._repositoryTree.set(r.path, r);
+							if (!this._repositoryTree.has(r.path)) {
+								this._repositoryTree.set(r.path, r);
+							}
 						}
 					}
 				}
@@ -299,7 +290,11 @@ export class GitService implements Disposable {
 				// Search for and add all repositories (nested and/or submodules)
 				const repositories = await this.repositorySearch(f);
 				for (const r of repositories) {
-					this._repositoryTree.set(r.path, r);
+					if (!this._repositoryTree.has(r.path)) {
+						this._repositoryTree.set(r.path, r);
+					}
+
+					void GitService.openBuiltInGitRepository(r.path);
 				}
 			}
 		}
@@ -310,14 +305,14 @@ export class GitService implements Disposable {
 
 			const repos = this._repositoryTree.findSuperstr(fsPath);
 			const reposToDelete =
-				repos !== undefined
+				repos != null
 					? // Since the filtered tree will have keys that are relative to the fsPath, normalize to the full path
 					  [...Iterables.map<Repository, [Repository, string]>(repos, r => [r, r.path])]
 					: [];
 
 			// const filteredTree = this._repositoryTree.findSuperstr(fsPath);
 			// const reposToDelete =
-			//     filteredTree !== undefined
+			//     filteredTree != null
 			//         ? // Since the filtered tree will have keys that are relative to the fsPath, normalize to the full path
 			//           [
 			//               ...Iterables.map<[Repository, string], [Repository, string]>(
@@ -328,7 +323,7 @@ export class GitService implements Disposable {
 			//         : [];
 
 			const repo = this._repositoryTree.get(fsPath);
-			if (repo !== undefined) {
+			if (repo != null) {
 				reposToDelete.push([repo, fsPath]);
 			}
 
@@ -353,7 +348,7 @@ export class GitService implements Disposable {
 		exit: result =>
 			`returned ${result.length} repositories${
 				result.length !== 0 ? ` (${result.map(r => r.path).join(', ')})` : emptyStr
-			}`
+			}`,
 	})
 	private async repositorySearch(folder: WorkspaceFolder): Promise<Repository[]> {
 		const cc = Logger.getCorrelationContext();
@@ -366,17 +361,17 @@ export class GitService implements Disposable {
 		const anyRepoChangedFn = this.onAnyRepositoryChanged.bind(this);
 
 		const rootPath = await this.getRepoPathCore(uri.fsPath, true);
-		if (rootPath !== undefined) {
+		if (rootPath != null) {
 			Logger.log(cc, `found root repository in '${rootPath}'`);
-			repositories.push(new Repository(folder, rootPath, true, anyRepoChangedFn, this._suspended));
+			repositories.push(new Repository(folder, rootPath, true, anyRepoChangedFn, !window.state.focused));
 		}
 
 		if (depth <= 0) return repositories;
 
 		// Get any specified excludes -- this is a total hack, but works for some simple cases and something is better than nothing :)
 		let excludes = {
-			...configuration.getAny<{ [key: string]: boolean }>('files.exclude', uri, {}),
-			...configuration.getAny<{ [key: string]: boolean }>('search.exclude', uri, {})
+			...configuration.getAny<Record<string, boolean>>('files.exclude', uri, {}),
+			...configuration.getAny<Record<string, boolean>>('search.exclude', uri, {}),
 		};
 
 		const excludedPaths = [
@@ -384,20 +379,21 @@ export class GitService implements Disposable {
 				if (!value) return undefined;
 				if (key.startsWith('**/')) return key.substring(3);
 				return key;
-			})
+			}),
 		];
 
 		excludes = excludedPaths.reduce((accumulator, current) => {
 			accumulator[current] = true;
 			return accumulator;
-		}, Object.create(null));
+		}, Object.create(null) as Record<string, boolean>);
 
 		let repoPaths;
 		try {
 			repoPaths = await this.repositorySearchCore(uri.fsPath, depth, excludes);
 		} catch (ex) {
-			if (RepoSearchWarnings.doesNotExist.test(ex.message || emptyStr)) {
-				Logger.log(cc, `FAILED${ex.message ? ` Error: ${ex.message}` : emptyStr}`);
+			const msg: string = ex?.toString() ?? emptyStr;
+			if (RepoSearchWarnings.doesNotExist.test(msg)) {
+				Logger.log(cc, `FAILED${msg ? ` Error: ${msg}` : emptyStr}`);
 			} else {
 				Logger.error(ex, cc, 'FAILED');
 			}
@@ -411,12 +407,13 @@ export class GitService implements Disposable {
 			if (Strings.normalizePath(p) === rootPath) continue;
 
 			Logger.log(cc, `searching in '${p}'...`);
+			Logger.debug(cc, `normalizedRepoPath=${Strings.normalizePath(p)}, rootPath=${rootPath}`);
 
 			const rp = await this.getRepoPathCore(p, true);
-			if (rp === undefined) continue;
+			if (rp == null) continue;
 
 			Logger.log(cc, `found repository in '${rp}'`);
-			repositories.push(new Repository(folder, rp, false, anyRepoChangedFn, this._suspended));
+			repositories.push(new Repository(folder, rp, false, anyRepoChangedFn, !window.state.focused));
 		}
 
 		return repositories;
@@ -427,14 +424,14 @@ export class GitService implements Disposable {
 			0: (root: string) => root,
 			1: (depth: number) => `${depth}`,
 			2: () => false,
-			3: () => false
-		}
+			3: () => false,
+		},
 	})
 	private repositorySearchCore(
 		root: string,
 		depth: number,
-		excludes: { [key: string]: boolean },
-		repositories: string[] = []
+		excludes: Record<string, boolean>,
+		repositories: string[] = [],
 	): Promise<string[]> {
 		const cc = Logger.getCorrelationContext();
 
@@ -472,19 +469,41 @@ export class GitService implements Disposable {
 		});
 	}
 
-	private async updateContext(repositoryTree: TernarySearchTree<Repository>) {
+	private async updateContext(repositoryTree: TernarySearchTree<string, Repository>) {
 		const hasRepository = repositoryTree.any();
-		await setCommandContext(CommandContext.Enabled, hasRepository);
+		await setEnabled(hasRepository);
 
 		let hasRemotes = false;
+		let hasRichRemotes = false;
+		let hasConnectedRemotes = false;
 		if (hasRepository) {
 			for (const repo of repositoryTree.values()) {
-				hasRemotes = await repo.hasRemotes();
-				if (hasRemotes) break;
+				if (!hasConnectedRemotes) {
+					hasConnectedRemotes = await repo.hasRichRemote(true);
+
+					if (hasConnectedRemotes) {
+						hasRichRemotes = true;
+						hasRemotes = true;
+					}
+				}
+
+				if (!hasRichRemotes) {
+					hasRichRemotes = await repo.hasRichRemote();
+				}
+
+				if (!hasRemotes) {
+					hasRemotes = await repo.hasRemotes();
+				}
+
+				if (hasRemotes && hasRichRemotes && hasConnectedRemotes) break;
 			}
 		}
 
-		await setCommandContext(CommandContext.HasRemotes, hasRemotes);
+		await Promise.all([
+			setContext(ContextKeys.HasRemotes, hasRemotes),
+			setContext(ContextKeys.HasRichRemotes, hasRichRemotes),
+			setContext(ContextKeys.HasConnectedRemotes, hasConnectedRemotes),
+		]);
 
 		// If we have no repositories setup a watcher in case one is initialized
 		if (!hasRepository) {
@@ -493,7 +512,7 @@ export class GitService implements Disposable {
 				watcher,
 				watcher.onDidCreate(async uri => {
 					const f = workspace.getWorkspaceFolder(uri);
-					if (f === undefined) return;
+					if (f == null) return;
 
 					// Search for and add all repositories (nested and/or submodules)
 					const repositories = await this.repositorySearch(f);
@@ -502,14 +521,18 @@ export class GitService implements Disposable {
 					disposable.dispose();
 
 					for (const r of repositories) {
-						this._repositoryTree.set(r.path, r);
+						if (!this._repositoryTree.has(r.path)) {
+							this._repositoryTree.set(r.path, r);
+						}
+
+						void GitService.openBuiltInGitRepository(r.path);
 					}
 
 					await this.updateContext(this._repositoryTree);
 
 					// Defer the event trigger enough to let everything unwind
 					setImmediate(() => this.fireRepositoriesChanged());
-				}, this)
+				}, this),
 			);
 		}
 	}
@@ -532,33 +555,33 @@ export class GitService implements Disposable {
 	async applyChangesToWorkingFile(uri: GitUri, ref1?: string, ref2?: string) {
 		const cc = Logger.getCorrelationContext();
 
-		ref1 = ref1 || uri.sha;
-		if (ref1 === undefined || uri.repoPath === undefined) return;
+		ref1 = ref1 ?? uri.sha;
+		if (ref1 == null || uri.repoPath == null) return;
 
-		if (ref2 === undefined) {
+		if (ref2 == null) {
 			ref2 = ref1;
 			ref1 = `${ref1}^`;
 		}
 
 		let patch;
 		try {
-			patch = await Git.diff(uri.repoPath, uri.fsPath, ref1, ref2, {
-				similarityThreshold: Container.config.advanced.similarityThreshold
-			});
+			patch = await Git.diff(uri.repoPath, uri.fsPath, ref1, ref2);
 			void (await Git.apply(uri.repoPath, patch));
 		} catch (ex) {
-			if (patch && /patch does not apply/i.test(ex.message)) {
+			const msg: string = ex?.toString() ?? emptyStr;
+			if (patch && /patch does not apply/i.test(msg)) {
 				const result = await window.showWarningMessage(
 					'Unable to apply changes cleanly. Retry and allow conflicts?',
 					{ title: 'Yes' },
-					{ title: 'No', isCloseAffordance: true }
+					{ title: 'No', isCloseAffordance: true },
 				);
 
-				if (result === undefined || result.title !== 'Yes') return;
+				if (result == null || result.title !== 'Yes') return;
 
 				if (result.title === 'Yes') {
 					try {
 						void (await Git.apply(uri.repoPath, patch, { allowConflicts: true }));
+
 						return;
 					} catch (e) {
 						// eslint-disable-next-line no-ex-assign
@@ -573,15 +596,23 @@ export class GitService implements Disposable {
 	}
 
 	@log()
+	async branchContainsCommit(repoPath: string, name: string, ref: string): Promise<boolean> {
+		let data = await Git.branch__containsOrPointsAt(repoPath, ref, { mode: 'contains', name: name });
+		data = data?.trim();
+		return Boolean(data);
+	}
+
+	@log()
 	async checkout(repoPath: string, ref: string, options: { createBranch?: string } | { fileName?: string } = {}) {
 		const cc = Logger.getCorrelationContext();
 
 		try {
 			return await Git.checkout(repoPath, ref, options);
 		} catch (ex) {
-			if (/overwritten by checkout/i.test(ex.message)) {
+			const msg: string = ex?.toString() ?? emptyStr;
+			if (/overwritten by checkout/i.test(msg)) {
 				void Messages.showGenericErrorMessage(
-					`Unable to checkout '${ref}'. Please commit or stash your changes before switching branches`
+					`Unable to checkout '${ref}'. Please commit or stash your changes before switching branches`,
 				);
 				return undefined;
 			}
@@ -592,28 +623,113 @@ export class GitService implements Disposable {
 		}
 	}
 
+	@log()
+	async resetCaches(
+		...cache: ('branches' | 'contributors' | 'providers' | 'remotes' | 'stashes' | 'status' | 'tags')[]
+	) {
+		if (cache.length === 0 || cache.includes('branches')) {
+			this._branchesCache.clear();
+
+			if (cache.length !== 0) {
+				for (const repo of await this.getRepositories()) {
+					repo.resetCaches('branch');
+				}
+			}
+		}
+
+		if (cache.length === 0 || cache.includes('contributors')) {
+			this._contributorsCache.clear();
+		}
+
+		if (cache.length === 0 || cache.includes('providers')) {
+			this._remotesWithApiProviderCache.clear();
+		}
+
+		if (cache.includes('remotes')) {
+			for (const repo of await this.getRepositories()) {
+				repo.resetCaches('remotes');
+			}
+		}
+
+		if (cache.length === 0 || cache.includes('stashes')) {
+			this._stashesCache.clear();
+		}
+
+		if (cache.length === 0 || cache.includes('status')) {
+			this._mergeStatusCache.clear();
+			this._rebaseStatusCache.clear();
+		}
+
+		if (cache.length === 0 || cache.includes('tags')) {
+			this._tagsCache.clear();
+		}
+
+		if (cache.length === 0) {
+			this._trackedCache.clear();
+			this._userMapCache.clear();
+
+			for (const repo of await this.getRepositories()) {
+				repo.resetCaches();
+			}
+		}
+	}
+
+	@log()
+	async excludeIgnoredUris(repoPath: string, uris: Uri[]): Promise<Uri[]> {
+		const paths = new Map<string, Uri>(uris.map(u => [Strings.normalizePath(u.fsPath), u]));
+
+		const data = await Git.check_ignore(repoPath, ...paths.keys());
+		if (data == null) return uris;
+
+		const ignored = data.split('\0').filter(<T>(i?: T): i is T => Boolean(i));
+		if (ignored.length === 0) return uris;
+
+		for (const file of ignored) {
+			paths.delete(file);
+		}
+
+		return [...paths.values()];
+	}
+
 	@gate()
 	@log()
-	fetch(repoPath: string, options: { all?: boolean; prune?: boolean; remote?: string } = {}) {
-		return Git.fetch(repoPath, options);
+	async fetch(
+		repoPath: string,
+		options: { all?: boolean; branch?: GitBranchReference; prune?: boolean; pull?: boolean; remote?: string } = {},
+	): Promise<void> {
+		const { branch: branchRef, ...opts } = options;
+		if (GitReference.isBranch(branchRef)) {
+			const repo = await this.getRepository(repoPath);
+			const branch = await repo?.getBranch(branchRef?.name);
+			if (!branch?.remote && branch?.tracking == null) return undefined;
+
+			return Git.fetch(repoPath, {
+				branch: branch.getNameWithoutRemote(),
+				remote: branch.getRemoteName()!,
+				upstream: branch.getTrackingWithoutRemote()!,
+				pull: options.pull,
+			});
+		}
+
+		return Git.fetch(repoPath, opts);
 	}
 
 	@gate<GitService['fetchAll']>(
-		(repos, opts) => `${repos === undefined ? '' : repos.map(r => r.id).join(',')}|${JSON.stringify(opts)}`
+		(repos, opts) => `${repos == null ? '' : repos.map(r => r.id).join(',')}|${JSON.stringify(opts)}`,
 	)
 	@log({
 		args: {
-			0: (repos?: Repository[]) => (repos === undefined ? false : repos.map(r => r.name).join(', '))
-		}
+			0: (repos?: Repository[]) => (repos == null ? false : repos.map(r => r.name).join(', ')),
+		},
 	})
 	async fetchAll(repositories?: Repository[], options: { all?: boolean; prune?: boolean } = {}) {
-		if (repositories === undefined) {
+		if (repositories == null) {
 			repositories = await this.getOrderedRepositories();
 		}
 		if (repositories.length === 0) return;
 
 		if (repositories.length === 1) {
-			repositories[0].fetch(options);
+			await repositories[0].fetch(options);
 
 			return;
 		}
@@ -621,28 +737,28 @@ export class GitService implements Disposable {
 		await window.withProgress(
 			{
 				location: ProgressLocation.Notification,
-				title: `Fetching ${repositories.length} repositories`
+				title: `Fetching ${repositories.length} repositories`,
 			},
-			() => Promise.all(repositories!.map(r => r.fetch({ progress: false, ...options })))
+			() => Promise.all(repositories!.map(r => r.fetch({ progress: false, ...options }))),
 		);
 	}
 
 	@gate<GitService['pullAll']>(
-		(repos, opts) => `${repos === undefined ? '' : repos.map(r => r.id).join(',')}|${JSON.stringify(opts)}`
+		(repos, opts) => `${repos == null ? '' : repos.map(r => r.id).join(',')}|${JSON.stringify(opts)}`,
 	)
 	@log({
 		args: {
-			0: (repos?: Repository[]) => (repos === undefined ? false : repos.map(r => r.name).join(', '))
-		}
+			0: (repos?: Repository[]) => (repos == null ? false : repos.map(r => r.name).join(', ')),
+		},
 	})
 	async pullAll(repositories?: Repository[], options: { rebase?: boolean } = {}) {
-		if (repositories === undefined) {
+		if (repositories == null) {
 			repositories = await this.getOrderedRepositories();
 		}
 		if (repositories.length === 0) return;
 
 		if (repositories.length === 1) {
-			repositories[0].pull(options);
+			await repositories[0].pull(options);
 
 			return;
 		}
@@ -650,26 +766,35 @@ export class GitService implements Disposable {
 		await window.withProgress(
 			{
 				location: ProgressLocation.Notification,
-				title: `Pulling ${repositories.length} repositories`
+				title: `Pulling ${repositories.length} repositories`,
 			},
-			() => Promise.all(repositories!.map(r => r.pull({ progress: false, ...options })))
+			() => Promise.all(repositories!.map(r => r.pull({ progress: false, ...options }))),
 		);
 	}
 
-	@gate<GitService['pushAll']>(repos => `${repos === undefined ? '' : repos.map(r => r.id).join(',')}`)
+	@gate<GitService['pushAll']>(repos => `${repos == null ? '' : repos.map(r => r.id).join(',')}`)
 	@log({
 		args: {
-			0: (repos?: Repository[]) => (repos === undefined ? false : repos.map(r => r.name).join(', '))
-		}
+			0: (repos?: Repository[]) => (repos == null ? false : repos.map(r => r.name).join(', ')),
+		},
 	})
-	async pushAll(repositories?: Repository[], options: { force?: boolean } = {}) {
-		if (repositories === undefined) {
+	async pushAll(
+		repositories?: Repository[],
+		options: {
+			force?: boolean;
+			reference?: GitReference;
+			publish?: {
+				remote: string;
+			};
+		} = {},
+	) {
+		if (repositories == null) {
 			repositories = await this.getOrderedRepositories();
 		}
 		if (repositories.length === 0) return;
 
 		if (repositories.length === 1) {
-			repositories[0].push(options);
+			await repositories[0].push(options);
 
 			return;
 		}
@@ -677,21 +802,21 @@ export class GitService implements Disposable {
 		await window.withProgress(
 			{
 				location: ProgressLocation.Notification,
-				title: `Pushing ${repositories.length} repositories`
+				title: `Pushing ${repositories.length} repositories`,
 			},
-			() => Promise.all(repositories!.map(r => r.push({ progress: false, ...options })))
+			() => Promise.all(repositories!.map(r => r.push({ progress: false, ...options }))),
 		);
 	}
 
 	@log({
 		args: {
 			0: (editor: TextEditor) =>
-				editor !== undefined ? `TextEditor(${Logger.toLoggable(editor.document.uri)})` : 'undefined'
-		}
+				editor != null ? `TextEditor(${Logger.toLoggable(editor.document.uri)})` : 'undefined',
+		},
 	})
 	async getActiveRepository(editor?: TextEditor): Promise<Repository | undefined> {
 		const repoPath = await this.getActiveRepoPath(editor);
-		if (repoPath === undefined) return undefined;
+		if (repoPath == null) return undefined;
 
 		return this.getRepository(repoPath);
 	}
@@ -699,16 +824,16 @@ export class GitService implements Disposable {
 	@log({
 		args: {
 			0: (editor: TextEditor) =>
-				editor !== undefined ? `TextEditor(${Logger.toLoggable(editor.document.uri)})` : 'undefined'
-		}
+				editor != null ? `TextEditor(${Logger.toLoggable(editor.document.uri)})` : 'undefined',
+		},
 	})
 	async getActiveRepoPath(editor?: TextEditor): Promise<string | undefined> {
-		editor = editor || window.activeTextEditor;
+		editor = editor ?? window.activeTextEditor;
 
 		let repoPath;
 		if (editor != null) {
 			const doc = await Container.tracker.getOrAdd(editor.document.uri);
-			if (doc !== undefined) {
+			if (doc != null) {
 				repoPath = doc.uri.repoPath;
 			}
 		}
@@ -721,9 +846,9 @@ export class GitService implements Disposable {
 	@log()
 	getHighlanderRepoPath(): string | undefined {
 		const entry = this._repositoryTree.highlander();
-		if (entry === undefined) return undefined;
+		if (entry == null) return undefined;
 
-		const [repo] = entry;
+		const [, repo] = entry;
 		return repo.path;
 	}
 
@@ -732,15 +857,15 @@ export class GitService implements Disposable {
 		const cc = Logger.getCorrelationContext();
 
 		let key = 'blame';
-		if (uri.sha !== undefined) {
+		if (uri.sha != null) {
 			key += `:${uri.sha}`;
 		}
 
 		const doc = await Container.tracker.getOrAdd(uri);
 		if (this.useCaching) {
-			if (doc.state !== undefined) {
+			if (doc.state != null) {
 				const cachedBlame = doc.state.get<CachedBlame>(key);
-				if (cachedBlame !== undefined) {
+				if (cachedBlame != null) {
 					Logger.debug(cc, `Cache hit: '${key}'`);
 					return cachedBlame.item;
 				}
@@ -748,18 +873,18 @@ export class GitService implements Disposable {
 
 			Logger.debug(cc, `Cache miss: '${key}'`);
 
-			if (doc.state === undefined) {
+			if (doc.state == null) {
 				doc.state = new GitDocumentState(doc.key);
 			}
 		}
 
 		const promise = this.getBlameForFileCore(uri, doc, key, cc);
 
-		if (doc.state !== undefined) {
+		if (doc.state != null) {
 			Logger.debug(cc, `Cache add: '${key}'`);
 
 			const value: CachedBlame = {
-				item: promise as Promise<GitBlame>
+				item: promise as Promise<GitBlame>,
 			};
 			doc.state.set<CachedBlame>(key, value);
 		}
@@ -771,7 +896,7 @@ export class GitService implements Disposable {
 		uri: GitUri,
 		document: TrackedDocument<GitDocumentState>,
 		key: string,
-		cc: LogCorrelationContext | undefined
+		cc: LogCorrelationContext | undefined,
 	): Promise<GitBlame | undefined> {
 		if (!(await this.isTracked(uri))) {
 			Logger.log(cc, `Skipping blame; '${uri.fsPath}' is not tracked`);
@@ -783,19 +908,19 @@ export class GitService implements Disposable {
 		try {
 			const data = await Git.blame(root, file, uri.sha, {
 				args: Container.config.advanced.blame.customArguments,
-				ignoreWhitespace: Container.config.blame.ignoreWhitespace
+				ignoreWhitespace: Container.config.blame.ignoreWhitespace,
 			});
 			const blame = GitBlameParser.parse(data, root, file, await this.getCurrentUser(root));
 			return blame;
 		} catch (ex) {
 			// Trap and cache expected blame errors
-			if (document.state !== undefined) {
-				const msg = ex && ex.toString();
+			if (document.state != null) {
+				const msg = ex?.toString() ?? '';
 				Logger.debug(cc, `Cache replace (with empty promise): '${key}'`);
 
 				const value: CachedBlame = {
 					item: emptyPromise as Promise<GitBlame>,
-					errorMessage: msg
+					errorMessage: msg,
 				};
 				document.state.set<CachedBlame>(key, value);
 
@@ -810,8 +935,8 @@ export class GitService implements Disposable {
 
 	@log({
 		args: {
-			1: contents => '<contents>'
-		}
+			1: _contents => '<contents>',
+		},
 	})
 	async getBlameForFileContents(uri: GitUri, contents: string): Promise<GitBlame | undefined> {
 		const cc = Logger.getCorrelationContext();
@@ -820,9 +945,9 @@ export class GitService implements Disposable {
 
 		const doc = await Container.tracker.getOrAdd(uri);
 		if (this.useCaching) {
-			if (doc.state !== undefined) {
+			if (doc.state != null) {
 				const cachedBlame = doc.state.get<CachedBlame>(key);
-				if (cachedBlame !== undefined) {
+				if (cachedBlame != null) {
 					Logger.debug(cc, `Cache hit: ${key}`);
 					return cachedBlame.item;
 				}
@@ -830,18 +955,18 @@ export class GitService implements Disposable {
 
 			Logger.debug(cc, `Cache miss: ${key}`);
 
-			if (doc.state === undefined) {
+			if (doc.state == null) {
 				doc.state = new GitDocumentState(doc.key);
 			}
 		}
 
 		const promise = this.getBlameForFileContentsCore(uri, contents, doc, key, cc);
 
-		if (doc.state !== undefined) {
+		if (doc.state != null) {
 			Logger.debug(cc, `Cache add: '${key}'`);
 
 			const value: CachedBlame = {
-				item: promise as Promise<GitBlame>
+				item: promise as Promise<GitBlame>,
 			};
 			doc.state.set<CachedBlame>(key, value);
 		}
@@ -854,7 +979,7 @@ export class GitService implements Disposable {
 		contents: string,
 		document: TrackedDocument<GitDocumentState>,
 		key: string,
-		cc: LogCorrelationContext | undefined
+		cc: LogCorrelationContext | undefined,
 	): Promise<GitBlame | undefined> {
 		if (!(await this.isTracked(uri))) {
 			Logger.log(cc, `Skipping blame; '${uri.fsPath}' is not tracked`);
@@ -867,19 +992,19 @@ export class GitService implements Disposable {
 			const data = await Git.blame__contents(root, file, contents, {
 				args: Container.config.advanced.blame.customArguments,
 				correlationKey: `:${key}`,
-				ignoreWhitespace: Container.config.blame.ignoreWhitespace
+				ignoreWhitespace: Container.config.blame.ignoreWhitespace,
 			});
 			const blame = GitBlameParser.parse(data, root, file, await this.getCurrentUser(root));
 			return blame;
 		} catch (ex) {
 			// Trap and cache expected blame errors
-			if (document.state !== undefined) {
-				const msg = ex && ex.toString();
+			if (document.state != null) {
+				const msg = ex?.toString() ?? '';
 				Logger.debug(cc, `Cache replace (with empty promise): '${key}'`);
 
 				const value: CachedBlame = {
 					item: emptyPromise as Promise<GitBlame>,
-					errorMessage: msg
+					errorMessage: msg,
 				};
 				document.state.set<CachedBlame>(key, value);
 
@@ -895,26 +1020,26 @@ export class GitService implements Disposable {
 	async getBlameForLine(
 		uri: GitUri,
 		editorLine: number, // editor lines are 0-based
-		options: { skipCache?: boolean } = {}
+		options: { skipCache?: boolean } = {},
 	): Promise<GitBlameLine | undefined> {
 		if (!options.skipCache && this.useCaching) {
 			const blame = await this.getBlameForFile(uri);
-			if (blame === undefined) return undefined;
+			if (blame == null) return undefined;
 
 			let blameLine = blame.lines[editorLine];
-			if (blameLine === undefined) {
+			if (blameLine == null) {
 				if (blame.lines.length !== editorLine) return undefined;
 				blameLine = blame.lines[editorLine - 1];
 			}
 
 			const commit = blame.commits.get(blameLine.sha);
-			if (commit === undefined) return undefined;
+			if (commit == null) return undefined;
 
 			const author = blame.authors.get(commit.author)!;
 			return {
 				author: { ...author, lineCount: commit.lines.length },
 				commit: commit,
-				line: blameLine
+				line: blameLine,
 			};
 		}
 
@@ -926,15 +1051,15 @@ export class GitService implements Disposable {
 				args: Container.config.advanced.blame.customArguments,
 				ignoreWhitespace: Container.config.blame.ignoreWhitespace,
 				startLine: lineToBlame,
-				endLine: lineToBlame
+				endLine: lineToBlame,
 			});
 			const blame = GitBlameParser.parse(data, uri.repoPath, fileName, await this.getCurrentUser(uri.repoPath!));
-			if (blame === undefined) return undefined;
+			if (blame == null) return undefined;
 
 			return {
 				author: Iterables.first(blame.authors.values()),
 				commit: Iterables.first(blame.commits.values()),
-				line: blame.lines[editorLine]
+				line: blame.lines[editorLine],
 			};
 		} catch {
 			return undefined;
@@ -943,33 +1068,33 @@ export class GitService implements Disposable {
 
 	@log({
 		args: {
-			2: contents => '<contents>'
-		}
+			2: _contents => '<contents>',
+		},
 	})
 	async getBlameForLineContents(
 		uri: GitUri,
 		editorLine: number, // editor lines are 0-based
 		contents: string,
-		options: { skipCache?: boolean } = {}
+		options: { skipCache?: boolean } = {},
 	): Promise<GitBlameLine | undefined> {
 		if (!options.skipCache && this.useCaching) {
 			const blame = await this.getBlameForFileContents(uri, contents);
-			if (blame === undefined) return undefined;
+			if (blame == null) return undefined;
 
 			let blameLine = blame.lines[editorLine];
-			if (blameLine === undefined) {
+			if (blameLine == null) {
 				if (blame.lines.length !== editorLine) return undefined;
 				blameLine = blame.lines[editorLine - 1];
 			}
 
 			const commit = blame.commits.get(blameLine.sha);
-			if (commit === undefined) return undefined;
+			if (commit == null) return undefined;
 
 			const author = blame.authors.get(commit.author)!;
 			return {
 				author: { ...author, lineCount: commit.lines.length },
 				commit: commit,
-				line: blameLine
+				line: blameLine,
 			};
 		}
 
@@ -981,16 +1106,16 @@ export class GitService implements Disposable {
 				args: Container.config.advanced.blame.customArguments,
 				ignoreWhitespace: Container.config.blame.ignoreWhitespace,
 				startLine: lineToBlame,
-				endLine: lineToBlame
+				endLine: lineToBlame,
 			});
 			const currentUser = await this.getCurrentUser(uri.repoPath!);
 			const blame = GitBlameParser.parse(data, uri.repoPath, fileName, currentUser);
-			if (blame === undefined) return undefined;
+			if (blame == null) return undefined;
 
 			return {
 				author: Iterables.first(blame.authors.values()),
 				commit: Iterables.first(blame.commits.values()),
-				line: blame.lines[editorLine]
+				line: blame.lines[editorLine],
 			};
 		} catch {
 			return undefined;
@@ -1000,27 +1125,27 @@ export class GitService implements Disposable {
 	@log()
 	async getBlameForRange(uri: GitUri, range: Range): Promise<GitBlameLines | undefined> {
 		const blame = await this.getBlameForFile(uri);
-		if (blame === undefined) return undefined;
+		if (blame == null) return undefined;
 
 		return this.getBlameForRangeSync(blame, uri, range);
 	}
 
 	@log({
 		args: {
-			2: contents => '<contents>'
-		}
+			2: _contents => '<contents>',
+		},
 	})
 	async getBlameForRangeContents(uri: GitUri, range: Range, contents: string): Promise<GitBlameLines | undefined> {
 		const blame = await this.getBlameForFileContents(uri, contents);
-		if (blame === undefined) return undefined;
+		if (blame == null) return undefined;
 
 		return this.getBlameForRangeSync(blame, uri, range);
 	}
 
 	@log({
 		args: {
-			0: blame => '<blame>'
-		}
+			0: _blame => '<blame>',
+		},
 	})
 	getBlameForRangeSync(blame: GitBlame, uri: GitUri, range: Range): GitBlameLines | undefined {
 		if (blame.lines.length === 0) return { allLines: blame.lines, ...blame };
@@ -1036,21 +1161,21 @@ export class GitService implements Disposable {
 		const startLine = range.start.line + 1;
 		const endLine = range.end.line + 1;
 
-		const authors: Map<string, GitAuthor> = new Map();
-		const commits: Map<string, GitBlameCommit> = new Map();
+		const authors = new Map<string, GitAuthor>();
+		const commits = new Map<string, GitBlameCommit>();
 		for (const c of blame.commits.values()) {
 			if (!shas.has(c.sha)) continue;
 
 			const commit = c.with({
-				lines: c.lines.filter(l => l.line >= startLine && l.line <= endLine)
+				lines: c.lines.filter(l => l.line >= startLine && l.line <= endLine),
 			});
 			commits.set(c.sha, commit);
 
 			let author = authors.get(commit.author);
-			if (author === undefined) {
+			if (author == null) {
 				author = {
 					name: commit.author,
-					lineCount: 0
+					lineCount: 0,
 				};
 				authors.set(author.name, author);
 			}
@@ -1065,117 +1190,192 @@ export class GitService implements Disposable {
 			authors: sortedAuthors,
 			commits: commits,
 			lines: lines,
-			allLines: blame.lines
+			allLines: blame.lines,
 		};
 	}
 
 	@log()
 	async getBranch(repoPath: string | undefined): Promise<GitBranch | undefined> {
-		if (repoPath === undefined) return undefined;
+		if (repoPath == null) return undefined;
+
+		let [branch] = await this.getBranches(repoPath, { filter: b => b.current });
+		if (branch != null) return branch;
 
 		const data = await Git.rev_parse__currentBranch(repoPath);
-		if (data === undefined) return undefined;
+		if (data == null) return undefined;
 
-		const committerDate = await Git.log__recent_committerdate(repoPath);
+		const [name, tracking] = data[0].split('\n');
+		if (GitBranch.isDetached(name)) {
+			const [rebaseStatus, committerDate] = await Promise.all([
+				this.getRebaseStatus(repoPath),
+				Git.log__recent_committerdate(repoPath),
+			]);
 
-		const branch = data[0].split('\n');
-		return new GitBranch(
-			repoPath,
-			branch[0],
-			false,
-			true,
-			committerDate === undefined ? undefined : new Date(Number(committerDate) * 1000),
-			data[1],
-			branch[1]
-		);
+			branch = new GitBranch(
+				repoPath,
+				rebaseStatus?.incoming.name ?? name,
+				false,
+				true,
+				committerDate != null ? new Date(Number(committerDate) * 1000) : undefined,
+				data[1],
+				tracking,
+				undefined,
+				undefined,
+				undefined,
+				rebaseStatus != null,
+			);
+		}
+
+		return branch;
 	}
 
-	@log()
+	@log({
+		args: {
+			0: b => b.name,
+		},
+	})
+	async getBranchAheadRange(branch: GitBranch) {
+		if (branch.state.ahead > 0) {
+			return GitRevision.createRange(branch.tracking, branch.ref);
+		}
+
+		if (!branch.tracking) {
+			// If we have no tracking branch, try to find a best guess branch to use as the "base"
+			const branches = await this.getBranches(branch.repoPath, {
+				filter: b => weightedDefaultBranches.has(b.name),
+			});
+			if (branches.length > 0) {
+				let weightedBranch: { weight: number; branch: GitBranch } | undefined;
+				for (const branch of branches) {
+					const weight = weightedDefaultBranches.get(branch.name)!;
+					if (weightedBranch == null || weightedBranch.weight < weight) {
+						weightedBranch = { weight: weight, branch: branch };
+					}
+
+					if (weightedBranch.weight === maxDefaultBranchWeight) break;
+				}
+
+				const possibleBranch = weightedBranch!.branch.tracking ?? weightedBranch!.branch.ref;
+				if (possibleBranch !== branch.ref) {
+					return GitRevision.createRange(possibleBranch, branch.ref);
+				}
+			}
+		}
+
+		return undefined;
+	}
+
+	@log({
+		args: {
+			1: () => false,
+		},
+	})
 	async getBranches(
 		repoPath: string | undefined,
-		options: { filter?: (b: GitBranch) => boolean; sort?: boolean } = {}
+		options: {
+			filter?: (b: GitBranch) => boolean;
+			sort?: boolean | { current?: boolean; orderBy?: BranchSorting };
+		} = {},
 	): Promise<GitBranch[]> {
-		if (repoPath === undefined) return [];
+		if (repoPath == null) return [];
 
-		let branches: GitBranch[] | undefined;
-		try {
-			if (this.useCaching) {
-				branches = this._branchesCache.get(repoPath);
-				if (branches !== undefined) return branches;
-			}
-
+		let branches = this.useCaching ? this._branchesCache.get(repoPath) : undefined;
+		if (branches == null) {
 			const data = await Git.for_each_ref__branch(repoPath, { all: true });
 			// If we don't get any data, assume the repo doesn't have any commits yet so check if we have a current branch
 			if (data == null || data.length === 0) {
-				const current = await this.getBranch(repoPath);
-				branches = current !== undefined ? [current] : [];
+				let current;
+
+				const data = await Git.rev_parse__currentBranch(repoPath);
+				if (data != null) {
+					const [name, tracking] = data[0].split('\n');
+					const [rebaseStatus, committerDate] = await Promise.all([
+						GitBranch.isDetached(name) ? this.getRebaseStatus(repoPath) : undefined,
+						Git.log__recent_committerdate(repoPath),
+					]);
+
+					current = new GitBranch(
+						repoPath,
+						rebaseStatus?.incoming.name ?? name,
+						false,
+						true,
+						committerDate != null ? new Date(Number(committerDate) * 1000) : undefined,
+						data[1],
+						tracking,
+						undefined,
+						undefined,
+						undefined,
+						rebaseStatus != null,
+					);
+				}
+
+				branches = current != null ? [current] : [];
 			} else {
 				branches = GitBranchParser.parse(data, repoPath);
 			}
 
 			if (this.useCaching) {
 				const repo = await this.getRepository(repoPath);
-				if (repo !== undefined && repo.supportsChangeEvents) {
+				if (repo?.supportsChangeEvents) {
 					this._branchesCache.set(repoPath, branches);
 				}
 			}
-
-			return branches;
-		} finally {
-			if (options.filter !== undefined) {
-				branches = branches!.filter(options.filter);
-			}
-
-			if (options.sort) {
-				GitBranch.sort(branches!);
-			}
-
-			if (options.filter !== undefined) {
-				// eslint-disable-next-line no-unsafe-finally
-				return branches!;
-			}
 		}
+
+		if (options.filter != null) {
+			branches = branches.filter(options.filter);
+		}
+
+		// eslint-disable-next-line @typescript-eslint/strict-boolean-expressions
+		if (options.sort) {
+			GitBranch.sort(branches, typeof options.sort === 'boolean' ? undefined : options.sort);
+		}
+
+		return branches;
 	}
 
-	@log()
+	@log({
+		args: {
+			1: () => false,
+		},
+	})
 	async getBranchesAndOrTags(
 		repoPath: string | undefined,
 		{
-			filterBranches,
-			filterTags,
+			filter,
 			include,
+			sort,
 			...options
 		}: {
-			filterBranches?: (b: GitBranch) => boolean;
-			filterTags?: (t: GitTag) => boolean;
+			filter?: { branches?: (b: GitBranch) => boolean; tags?: (t: GitTag) => boolean };
 			include?: 'all' | 'branches' | 'tags';
-			sort?: boolean;
-		} = {}
+			sort?:
+				| boolean
+				| { branches?: { current?: boolean; orderBy?: BranchSorting }; tags?: { orderBy?: TagSorting } };
+		} = {},
 	) {
 		const [branches, tags] = await Promise.all<GitBranch[] | undefined, GitTag[] | undefined>([
-			include === 'all' || include === 'branches'
+			include == null || include === 'all' || include === 'branches'
 				? this.getBranches(repoPath, {
 						...options,
-						filter: filterBranches
+						filter: filter?.branches,
+						sort: typeof sort === 'boolean' ? undefined : sort?.branches,
 				  })
 				: undefined,
-			include === 'all' || include === 'tags'
+			include == null || include === 'all' || include === 'tags'
 				? this.getTags(repoPath, {
 						...options,
-						filter: filterTags
+						filter: filter?.tags,
+						sort: typeof sort === 'boolean' ? undefined : sort?.tags,
 				  })
-				: undefined
+				: undefined,
 		]);
 
-		if (branches !== undefined && tags !== undefined) {
+		if (branches != null && tags != null) {
 			return [...branches.filter(b => !b.remote), ...tags, ...branches.filter(b => b.remote)];
 		}
 
-		if (branches !== undefined) {
-			return branches;
-		}
-
-		return tags;
+		return branches ?? tags;
 	}
 
 	@log()
@@ -1183,68 +1383,112 @@ export class GitService implements Disposable {
 		const [branches, tags] = await Promise.all([this.getBranches(repoPath), this.getTags(repoPath)]);
 
 		const branchesAndTagsBySha = Arrays.groupByFilterMap(
-			(branches as { name: string; sha: string }[]).concat(tags as { name: string; sha: string }[]),
+			(branches as (GitBranch | GitTag)[]).concat(tags as (GitBranch | GitTag)[]),
 			bt => bt.sha,
-			bt => (bt.name === currentName ? undefined : bt.name)
+			bt => {
+				if (currentName) {
+					if (bt.name === currentName) return undefined;
+					if (bt.refType === 'branch' && bt.getNameWithoutRemote() === currentName) {
+						return { name: bt.name, compactName: bt.getRemoteName() };
+					}
+				}
+
+				return { name: bt.name };
+			},
 		);
 
-		return (sha: string) => {
+		return (sha: string, compact?: boolean): string | undefined => {
 			const branchesAndTags = branchesAndTagsBySha.get(sha);
-			if (branchesAndTags === undefined || branchesAndTags.length === 0) return undefined;
-			return branchesAndTags.join(', ');
+			if (branchesAndTags == null || branchesAndTags.length === 0) return undefined;
+
+			if (!compact) return branchesAndTags.map(bt => bt.name).join(', ');
+
+			if (branchesAndTags.length > 1) {
+				return [branchesAndTags[0], { name: GlyphChars.Ellipsis }]
+					.map(bt => bt.compactName ?? bt.name)
+					.join(', ');
+			}
+
+			return branchesAndTags.map(bt => bt.compactName ?? bt.name).join(', ');
 		};
 	}
 
 	@log()
 	async getChangedFilesCount(repoPath: string, ref?: string): Promise<GitDiffShortStat | undefined> {
 		const data = await Git.diff__shortstat(repoPath, ref);
+		if (!data) return undefined;
+
 		return GitDiffParser.parseShortStat(data);
 	}
 
 	@log()
 	async getCommit(repoPath: string, ref: string): Promise<GitLogCommit | undefined> {
 		const log = await this.getLog(repoPath, { limit: 2, ref: ref });
-		if (log === undefined) return undefined;
+		if (log == null) return undefined;
 
-		return log.commits.get(ref) || Iterables.first(log.commits.values());
+		return log.commits.get(ref) ?? Iterables.first(log.commits.values());
 	}
 
 	@log()
-	async getCommitBranches(repoPath: string, ref: string, options?: { remotes?: boolean }): Promise<string[]> {
-		const data = await Git.branch__contains(repoPath, ref, options);
+	async getCommitBranches(
+		repoPath: string,
+		ref: string,
+		options?: { mode?: 'contains' | 'pointsAt'; remotes?: boolean },
+	): Promise<string[]> {
+		const data = await Git.branch__containsOrPointsAt(repoPath, ref, options);
 		if (!data) return [];
 
 		return data
 			.split('\n')
-			.map(b => b.substr(2).trim())
-			.filter(Boolean);
+			.map(b => b.trim())
+			.filter(<T>(i?: T): i is T => Boolean(i));
 	}
 
 	@log()
-	getCommitCount(repoPath: string, refs: string[]) {
-		return Git.rev_list(repoPath, refs, { count: true });
+	getAheadBehindCommitCount(
+		repoPath: string,
+		refs: string[],
+	): Promise<{ ahead: number; behind: number } | undefined> {
+		return Git.rev_list__left_right(repoPath, refs);
+	}
+
+	@log()
+	getCommitCount(repoPath: string, ref: string): Promise<number | undefined> {
+		return Git.rev_list__count(repoPath, ref);
 	}
 
 	@log()
 	async getCommitForFile(
 		repoPath: string | undefined,
 		fileName: string,
-		options: { ref?: string; firstIfNotFound?: boolean; reverse?: boolean } = {}
+		options: { ref?: string; firstIfNotFound?: boolean; range?: Range; reverse?: boolean } = {},
 	): Promise<GitLogCommit | undefined> {
 		const log = await this.getLogForFile(repoPath, fileName, {
 			limit: 2,
 			ref: options.ref,
-			reverse: options.reverse
+			range: options.range,
+			reverse: options.reverse,
 		});
-		if (log === undefined) return undefined;
+		if (log == null) return undefined;
 
 		const commit = options.ref ? log.commits.get(options.ref) : undefined;
-		if (commit === undefined && !options.firstIfNotFound && options.ref) {
+		if (commit == null && !options.firstIfNotFound && options.ref) {
 			// If the ref isn't a valid sha we will never find it, so let it fall through so we return the first
-			if (Git.isSha(options.ref) || Git.isUncommitted(options.ref)) return undefined;
+			if (GitRevision.isSha(options.ref) || GitRevision.isUncommitted(options.ref)) return undefined;
 		}
 
 		return commit ?? Iterables.first(log.commits.values());
+	}
+
+	@log()
+	async getOldestUnpushedRefForFile(repoPath: string, fileName: string): Promise<string | undefined> {
+		const data = await Git.log__file(repoPath, fileName, '@{push}..', {
+			format: 'refs',
+			renames: true,
+		});
+		if (data == null || data.length === 0) return undefined;
+
+		return GitLogParser.parseLastRefOnly(data);
 	}
 
 	@log()
@@ -1254,47 +1498,92 @@ export class GitService implements Disposable {
 
 	@log()
 	async getContributors(repoPath: string): Promise<GitContributor[]> {
-		if (repoPath === undefined) return [];
+		if (repoPath == null) return [];
 
-		const data = await Git.shortlog(repoPath);
-		const shortlog = GitShortLogParser.parse(data, repoPath);
-		return shortlog === undefined ? [] : shortlog.contributors;
+		let contributors = this.useCaching ? this._contributorsCache.get(repoPath) : undefined;
+		if (contributors == null) {
+			try {
+				const data = await Git.shortlog(repoPath);
+				const shortlog = GitShortLogParser.parse(data, repoPath);
+				if (shortlog != null) {
+					// Mark the current user
+					const currentUser = await this.getCurrentUser(repoPath);
+					if (currentUser != null) {
+						const index = shortlog.contributors.findIndex(
+							c => currentUser.email === c.email && currentUser.name === c.name,
+						);
+						if (index !== -1) {
+							const c = shortlog.contributors[index];
+							shortlog.contributors.splice(
+								index,
+								1,
+								new GitContributor(c.repoPath, c.name, c.email, c.count, true),
+							);
+						}
+					}
+
+					contributors = shortlog.contributors;
+				} else {
+					contributors = [];
+				}
+
+				const repo = await this.getRepository(repoPath);
+				if (repo?.supportsChangeEvents) {
+					this._contributorsCache.set(repoPath, contributors);
+				}
+			} catch (ex) {
+				return [];
+			}
+		}
+
+		return contributors;
 	}
 
 	@log()
+	@gate()
 	async getCurrentUser(repoPath: string) {
 		let user = this._userMapCache.get(repoPath);
 		if (user != null) return user;
 		// If we found the repo, but no user data was found just return
 		if (user === null) return undefined;
 
-		const data = await Git.config__get_regex('user.(name|email)', repoPath, { local: true });
-		if (!data) {
-			// If we found no user data, mark it so we won't bother trying again
-			this._userMapCache.set(repoPath, null);
-			return undefined;
-		}
-
 		user = { name: undefined, email: undefined };
 
-		let key: string;
-		let value: string;
+		const data = await Git.config__get_regex('^user\\.', repoPath, { local: true });
+		if (data) {
+			let key: string;
+			let value: string;
 
-		let match;
-		do {
-			match = userConfigRegex.exec(data);
-			if (match == null) break;
+			let match;
+			do {
+				match = userConfigRegex.exec(data);
+				if (match == null) break;
 
-			[, key, value] = match;
-			// Stops excessive memory usage -- https://bugs.chromium.org/p/v8/issues/detail?id=2869
-			user[key as 'name' | 'email'] = ` ${value}`.substr(1);
-		} while (true);
+				[, key, value] = match;
+				// Stops excessive memory usage -- https://bugs.chromium.org/p/v8/issues/detail?id=2869
+				user[key as 'name' | 'email'] = ` ${value}`.substr(1);
+			} while (true);
+		} else {
+			user.name =
+				process.env.GIT_AUTHOR_NAME || process.env.GIT_COMMITTER_NAME || os.userInfo()?.username || undefined;
+			if (!user.name) {
+				// If we found no user data, mark it so we won't bother trying again
+				this._userMapCache.set(repoPath, null);
+				return undefined;
+			}
+
+			user.email =
+				process.env.GIT_AUTHOR_EMAIL ||
+				process.env.GIT_COMMITTER_EMAIL ||
+				process.env.EMAIL ||
+				`${user.name}@${os.hostname()}`;
+		}
 
 		const author = `${user.name} <${user.email}>`;
 		// Check if there is a mailmap for the current user
 		const mappedAuthor = await Git.check_mailmap(repoPath, author);
 		if (mappedAuthor != null && mappedAuthor.length !== 0 && author !== mappedAuthor) {
-			match = mappedAuthorRegex.exec(mappedAuthor);
+			const match = mappedAuthorRegex.exec(mappedAuthor);
 			if (match != null) {
 				[, user.name, user.email] = match;
 			}
@@ -1309,23 +1598,23 @@ export class GitService implements Disposable {
 		uri: GitUri,
 		ref1: string | undefined,
 		ref2?: string,
-		originalFileName?: string
+		originalFileName?: string,
 	): Promise<GitDiff | undefined> {
 		const cc = Logger.getCorrelationContext();
 
 		let key = 'diff';
-		if (ref1 !== undefined) {
+		if (ref1 != null) {
 			key += `:${ref1}`;
 		}
-		if (ref2 !== undefined) {
+		if (ref2 != null) {
 			key += `:${ref2}`;
 		}
 
 		const doc = await Container.tracker.getOrAdd(uri);
 		if (this.useCaching) {
-			if (doc.state !== undefined) {
+			if (doc.state != null) {
 				const cachedDiff = doc.state.get<CachedDiff>(key);
-				if (cachedDiff !== undefined) {
+				if (cachedDiff != null) {
 					Logger.debug(cc, `Cache hit: '${key}'`);
 					return cachedDiff.item;
 				}
@@ -1333,7 +1622,7 @@ export class GitService implements Disposable {
 
 			Logger.debug(cc, `Cache miss: '${key}'`);
 
-			if (doc.state === undefined) {
+			if (doc.state == null) {
 				doc.state = new GitDocumentState(doc.key);
 			}
 		}
@@ -1347,14 +1636,14 @@ export class GitService implements Disposable {
 			{ encoding: GitService.getEncoding(uri) },
 			doc,
 			key,
-			cc
+			cc,
 		);
 
-		if (doc.state !== undefined) {
+		if (doc.state != null) {
 			Logger.debug(cc, `Cache add: '${key}'`);
 
 			const value: CachedDiff = {
-				item: promise as Promise<GitDiff>
+				item: promise as Promise<GitDiff>,
 			};
 			doc.state.set<CachedDiff>(key, value);
 		}
@@ -1371,35 +1660,134 @@ export class GitService implements Disposable {
 		options: { encoding?: string },
 		document: TrackedDocument<GitDocumentState>,
 		key: string,
-		cc: LogCorrelationContext | undefined
+		cc: LogCorrelationContext | undefined,
 	): Promise<GitDiff | undefined> {
 		const [file, root] = Git.splitPath(fileName, repoPath, false);
 
 		try {
-			let data;
-			if (ref1 !== undefined && ref2 === undefined && !Git.isUncommittedStaged(ref1)) {
-				data = await Git.show__diff(root, file, ref1, originalFileName, {
-					similarityThreshold: Container.config.advanced.similarityThreshold
-				});
-			} else {
-				data = await Git.diff(root, file, ref1, ref2, {
-					...options,
-					filter: 'M',
-					similarityThreshold: Container.config.advanced.similarityThreshold
-				});
-			}
+			// let data;
+			// if (ref2 == null && ref1 != null && !GitRevision.isUncommittedStaged(ref1)) {
+			// 	data = await Git.show__diff(root, file, ref1, originalFileName, {
+			// 		similarityThreshold: Container.config.advanced.similarityThreshold,
+			// 	});
+			// } else {
+			const data = await Git.diff(root, file, ref1, ref2, {
+				...options,
+				filters: ['M'],
+				linesOfContext: 0,
+				renames: true,
+				similarityThreshold: Container.config.advanced.similarityThreshold,
+			});
+			// }
 
 			const diff = GitDiffParser.parse(data);
 			return diff;
 		} catch (ex) {
 			// Trap and cache expected diff errors
-			if (document.state !== undefined) {
-				const msg = ex && ex.toString();
+			if (document.state != null) {
+				const msg = ex?.toString() ?? '';
 				Logger.debug(cc, `Cache replace (with empty promise): '${key}'`);
 
 				const value: CachedDiff = {
 					item: emptyPromise as Promise<GitDiff>,
-					errorMessage: msg
+					errorMessage: msg,
+				};
+				document.state.set<CachedDiff>(key, value);
+
+				return emptyPromise as Promise<GitDiff>;
+			}
+
+			return undefined;
+		}
+	}
+
+	@log({
+		args: {
+			1: _contents => '<contents>',
+		},
+	})
+	async getDiffForFileContents(
+		uri: GitUri,
+		ref: string,
+		contents: string,
+		originalFileName?: string,
+	): Promise<GitDiff | undefined> {
+		const cc = Logger.getCorrelationContext();
+
+		const key = `diff:${Strings.sha1(contents)}`;
+
+		const doc = await Container.tracker.getOrAdd(uri);
+		if (this.useCaching) {
+			if (doc.state != null) {
+				const cachedDiff = doc.state.get<CachedDiff>(key);
+				if (cachedDiff != null) {
+					Logger.debug(cc, `Cache hit: ${key}`);
+					return cachedDiff.item;
+				}
+			}
+
+			Logger.debug(cc, `Cache miss: ${key}`);
+
+			if (doc.state == null) {
+				doc.state = new GitDocumentState(doc.key);
+			}
+		}
+
+		const promise = this.getDiffForFileContentsCore(
+			uri.repoPath,
+			uri.fsPath,
+			ref,
+			contents,
+			originalFileName,
+			{ encoding: GitService.getEncoding(uri) },
+			doc,
+			key,
+			cc,
+		);
+
+		if (doc.state != null) {
+			Logger.debug(cc, `Cache add: '${key}'`);
+
+			const value: CachedDiff = {
+				item: promise as Promise<GitDiff>,
+			};
+			doc.state.set<CachedDiff>(key, value);
+		}
+
+		return promise;
+	}
+
+	async getDiffForFileContentsCore(
+		repoPath: string | undefined,
+		fileName: string,
+		ref: string,
+		contents: string,
+		originalFileName: string | undefined,
+		options: { encoding?: string },
+		document: TrackedDocument<GitDocumentState>,
+		key: string,
+		cc: LogCorrelationContext | undefined,
+	): Promise<GitDiff | undefined> {
+		const [file, root] = Git.splitPath(fileName, repoPath, false);
+
+		try {
+			const data = await Git.diff__contents(root, file, ref, contents, {
+				...options,
+				filters: ['M'],
+				similarityThreshold: Container.config.advanced.similarityThreshold,
+			});
+
+			const diff = GitDiffParser.parse(data);
+			return diff;
+		} catch (ex) {
+			// Trap and cache expected diff errors
+			if (document.state != null) {
+				const msg = ex?.toString() ?? '';
+				Logger.debug(cc, `Cache replace (with empty promise): '${key}'`);
+
+				const value: CachedDiff = {
+					item: emptyPromise as Promise<GitDiff>,
+					errorMessage: msg,
 				};
 				document.state.set<CachedDiff>(key, value);
 
@@ -1416,17 +1804,17 @@ export class GitService implements Disposable {
 		editorLine: number, // editor lines are 0-based
 		ref1: string | undefined,
 		ref2?: string,
-		originalFileName?: string
+		originalFileName?: string,
 	): Promise<GitDiffHunkLine | undefined> {
 		try {
 			const diff = await this.getDiffForFile(uri, ref1, ref2, originalFileName);
-			if (diff === undefined) return undefined;
+			if (diff == null) return undefined;
 
 			const line = editorLine + 1;
-			const hunk = diff.hunks.find(c => c.currentPosition.start <= line && c.currentPosition.end >= line);
-			if (hunk === undefined) return undefined;
+			const hunk = diff.hunks.find(c => c.current.position.start <= line && c.current.position.end >= line);
+			if (hunk == null) return undefined;
 
-			return hunk.lines[line - hunk.currentPosition.start];
+			return hunk.lines[line - hunk.current.position.start];
 		} catch (ex) {
 			return undefined;
 		}
@@ -1437,15 +1825,15 @@ export class GitService implements Disposable {
 		repoPath: string,
 		ref1?: string,
 		ref2?: string,
-		options: { filter?: string; similarityThreshold?: number } = {}
+		options: { filters?: GitDiffFilter[]; similarityThreshold?: number } = {},
 	): Promise<GitFile[] | undefined> {
 		try {
 			const data = await Git.diff__name_status(repoPath, ref1, ref2, {
 				similarityThreshold: Container.config.advanced.similarityThreshold,
-				...options
+				...options,
 			});
 			const files = GitDiffParser.parseNameStatus(data, repoPath);
-			return files === undefined || files.length === 0 ? undefined : files;
+			return files == null || files.length === 0 ? undefined : files;
 		} catch (ex) {
 			return undefined;
 		}
@@ -1453,13 +1841,13 @@ export class GitService implements Disposable {
 
 	@log()
 	async getFileStatusForCommit(repoPath: string, fileName: string, ref: string): Promise<GitFile | undefined> {
-		if (ref === GitService.deletedOrMissingSha || Git.isUncommitted(ref)) return undefined;
+		if (ref === GitRevision.deletedOrMissing || GitRevision.isUncommitted(ref)) return undefined;
 
 		const data = await Git.show__name_status(repoPath, fileName, ref);
 		if (!data) return undefined;
 
 		const files = GitDiffParser.parseNameStatus(data, repoPath);
-		if (files === undefined || files.length === 0) return undefined;
+		if (files == null || files.length === 0) return undefined;
 
 		return files[0];
 	}
@@ -1470,7 +1858,14 @@ export class GitService implements Disposable {
 		{
 			ref,
 			...options
-		}: { authors?: string[]; limit?: number; merges?: boolean; ref?: string; reverse?: boolean } = {}
+		}: {
+			authors?: string[];
+			limit?: number;
+			merges?: boolean;
+			ref?: string;
+			reverse?: boolean;
+			since?: string;
+		} = {},
 	): Promise<GitLog | undefined> {
 		const limit = options.limit ?? Container.config.advanced.maxListItems ?? 0;
 
@@ -1478,9 +1873,10 @@ export class GitService implements Disposable {
 			const data = await Git.log(repoPath, ref, {
 				authors: options.authors,
 				limit: limit,
-				merges: options.merges === undefined ? true : options.merges,
+				merges: options.merges == null ? true : options.merges,
 				reverse: options.reverse,
-				similarityThreshold: Container.config.advanced.similarityThreshold
+				similarityThreshold: Container.config.advanced.similarityThreshold,
+				since: options.since,
 			});
 			const log = GitLogParser.parse(
 				data,
@@ -1491,10 +1887,10 @@ export class GitService implements Disposable {
 				await this.getCurrentUser(repoPath),
 				limit,
 				options.reverse!,
-				undefined
+				undefined,
 			);
 
-			if (log !== undefined) {
+			if (log != null) {
 				const opts = { ...options, ref: ref };
 				log.query = (limit: number | undefined) => this.getLog(repoPath, { ...opts, limit: limit });
 				if (log.hasMore) {
@@ -1508,9 +1904,43 @@ export class GitService implements Disposable {
 		}
 	}
 
+	@log()
+	async getLogRefsOnly(
+		repoPath: string,
+		{
+			ref,
+			...options
+		}: {
+			authors?: string[];
+			limit?: number;
+			merges?: boolean;
+			ref?: string;
+			reverse?: boolean;
+			since?: string;
+		} = {},
+	): Promise<Set<string> | undefined> {
+		const limit = options.limit ?? Container.config.advanced.maxListItems ?? 0;
+
+		try {
+			const data = await Git.log(repoPath, ref, {
+				authors: options.authors,
+				format: 'refs',
+				limit: limit,
+				merges: options.merges == null ? true : options.merges,
+				reverse: options.reverse,
+				similarityThreshold: Container.config.advanced.similarityThreshold,
+				since: options.since,
+			});
+			const commits = GitLogParser.parseRefsOnly(data);
+			return new Set(commits);
+		} catch (ex) {
+			return undefined;
+		}
+	}
+
 	private getLogMoreFn(
 		log: GitLog,
-		options: { authors?: string[]; limit?: number; merges?: boolean; ref?: string; reverse?: boolean }
+		options: { authors?: string[]; limit?: number; merges?: boolean; ref?: string; reverse?: boolean },
 	): (limit: number | { until: string } | undefined) => Promise<GitLog> {
 		return async (limit: number | { until: string } | undefined) => {
 			const moreUntil = limit != null && typeof limit === 'object' ? limit.until : undefined;
@@ -1522,27 +1952,50 @@ export class GitService implements Disposable {
 
 			moreLimit = moreLimit ?? Container.config.advanced.maxSearchItems ?? 0;
 
+			// If the log is for a range, then just get everything prior + more
+			if (GitRevision.isRange(log.sha)) {
+				const moreLog = await this.getLog(log.repoPath, {
+					...options,
+					limit: moreLimit === 0 ? 0 : (options.limit ?? 0) + moreLimit,
+				});
+				// If we can't find any more, assume we have everything
+				if (moreLog == null) return { ...log, hasMore: false };
+
+				return moreLog;
+			}
+
 			const ref = Iterables.last(log.commits.values())?.ref;
 			const moreLog = await this.getLog(log.repoPath, {
 				...options,
 				limit: moreUntil == null ? moreLimit : 0,
-				ref: moreUntil == null ? `${ref}^` : `${moreUntil}^..${ref}^`
+				ref: moreUntil == null ? `${ref}^` : `${moreUntil}^..${ref}^`,
 			});
-			if (moreLog === undefined) {
-				// If we can't find any more, assume we have everything
-				return { ...log, hasMore: false };
+			// If we can't find any more, assume we have everything
+			if (moreLog == null) return { ...log, hasMore: false };
+
+			// Merge authors
+			const authors = new Map([...log.authors]);
+			for (const [key, addAuthor] of moreLog.authors) {
+				const author = authors.get(key);
+				if (author == null) {
+					authors.set(key, addAuthor);
+				} else {
+					author.lineCount += addAuthor.lineCount;
+				}
 			}
+
+			const commits = new Map([...log.commits, ...moreLog.commits]);
 
 			const mergedLog: GitLog = {
 				repoPath: log.repoPath,
-				authors: new Map([...log.authors, ...moreLog.authors]),
-				commits: new Map([...log.commits, ...moreLog.commits]),
+				authors: authors,
+				commits: commits,
 				sha: log.sha,
 				range: undefined,
-				count: log.count + moreLog.count,
+				count: commits.size,
 				limit: moreUntil == null ? (log.limit ?? 0) + moreLimit : undefined,
 				hasMore: moreUntil == null ? moreLog.hasMore : true,
-				query: (limit: number | undefined) => this.getLog(log.repoPath, { ...options, limit: limit })
+				query: (limit: number | undefined) => this.getLog(log.repoPath, { ...options, limit: limit }),
 			};
 			mergedLog.more = this.getLogMoreFn(mergedLog, options);
 
@@ -1554,7 +2007,7 @@ export class GitService implements Disposable {
 	async getLogForSearch(
 		repoPath: string,
 		search: SearchPattern,
-		options: { limit?: number; skip?: number } = {}
+		options: { limit?: number; skip?: number } = {},
 	): Promise<GitLog | undefined> {
 		search = { matchAll: false, matchCase: false, matchRegex: true, ...search };
 
@@ -1562,7 +2015,7 @@ export class GitService implements Disposable {
 			const limit = options.limit ?? Container.config.advanced.maxSearchItems ?? 0;
 			const similarityThreshold = Container.config.advanced.similarityThreshold;
 
-			const operations = GitService.parseSearchOperations(search.pattern);
+			const operations = SearchPattern.parseSearchOperations(search.pattern);
 
 			const searchArgs = new Set<string>();
 			const files: string[] = [];
@@ -1571,7 +2024,7 @@ export class GitService implements Disposable {
 
 			let op;
 			let values = operations.get('commit:');
-			if (values !== undefined) {
+			if (values != null) {
 				useShow = true;
 
 				searchArgs.add('-m');
@@ -1641,10 +2094,10 @@ export class GitService implements Disposable {
 				await this.getCurrentUser(repoPath),
 				limit,
 				false,
-				undefined
+				undefined,
 			);
 
-			if (log !== undefined) {
+			if (log != null) {
 				log.query = (limit: number | undefined) =>
 					this.getLogForSearch(repoPath, search, { ...options, limit: limit });
 				if (log.hasMore) {
@@ -1661,7 +2114,7 @@ export class GitService implements Disposable {
 	private getLogForSearchMoreFn(
 		log: GitLog,
 		search: SearchPattern,
-		options: { limit?: number }
+		options: { limit?: number },
 	): (limit: number | undefined) => Promise<GitLog> {
 		return async (limit: number | undefined) => {
 			limit = limit ?? Container.config.advanced.maxSearchItems ?? 0;
@@ -1669,24 +2122,37 @@ export class GitService implements Disposable {
 			const moreLog = await this.getLogForSearch(log.repoPath, search, {
 				...options,
 				limit: limit,
-				skip: log.count
+				skip: log.count,
 			});
-			if (moreLog === undefined) {
+			if (moreLog == null) {
 				// If we can't find any more, assume we have everything
 				return { ...log, hasMore: false };
 			}
 
+			// Merge authors
+			const authors = new Map([...log.authors]);
+			for (const [key, addAuthor] of moreLog.authors) {
+				const author = authors.get(key);
+				if (author == null) {
+					authors.set(key, addAuthor);
+				} else {
+					author.lineCount += addAuthor.lineCount;
+				}
+			}
+
+			const commits = new Map([...log.commits, ...moreLog.commits]);
+
 			const mergedLog: GitLog = {
 				repoPath: log.repoPath,
-				authors: new Map([...log.authors, ...moreLog.authors]),
-				commits: new Map([...log.commits, ...moreLog.commits]),
+				authors: authors,
+				commits: commits,
 				sha: log.sha,
 				range: log.range,
-				count: log.count + moreLog.count,
+				count: commits.size,
 				limit: (log.limit ?? 0) + limit,
 				hasMore: moreLog.hasMore,
 				query: (limit: number | undefined) =>
-					this.getLogForSearch(log.repoPath, search, { ...options, limit: limit })
+					this.getLogForSearch(log.repoPath, search, { ...options, limit: limit }),
 			};
 			mergedLog.more = this.getLogForSearchMoreFn(mergedLog, search, options);
 
@@ -1697,9 +2163,18 @@ export class GitService implements Disposable {
 	async getLogForFile(
 		repoPath: string | undefined,
 		fileName: string,
-		options: { limit?: number; range?: Range; ref?: string; renames?: boolean; reverse?: boolean } = {}
+		options: {
+			all?: boolean;
+			limit?: number;
+			range?: Range;
+			ref?: string;
+			renames?: boolean;
+			reverse?: boolean;
+			since?: string;
+			skip?: number;
+		} = {},
 	): Promise<GitLog | undefined> {
-		if (repoPath !== undefined && repoPath === Strings.normalizePath(fileName)) {
+		if (repoPath != null && repoPath === Strings.normalizePath(fileName)) {
 			throw new Error(`File name cannot match the repository path; fileName=${fileName}`);
 		}
 
@@ -1707,13 +2182,20 @@ export class GitService implements Disposable {
 
 		options = { reverse: false, ...options };
 
-		if (options.renames === undefined) {
+		if (options.renames == null) {
 			options.renames = Container.config.advanced.fileHistoryFollowsRenames;
 		}
 
 		let key = 'log';
-		if (options.ref !== undefined) {
+		if (options.ref != null) {
 			key += `:${options.ref}`;
+		}
+
+		if (options.all == null) {
+			options.all = Container.config.advanced.fileHistoryShowAllBranches;
+		}
+		if (options.all) {
+			key += ':all';
 		}
 
 		options.limit = options.limit == null ? Container.config.advanced.maxListItems || 0 : options.limit;
@@ -1729,29 +2211,37 @@ export class GitService implements Disposable {
 			key += ':reverse';
 		}
 
+		if (options.since) {
+			key += `:since=${options.since}`;
+		}
+
+		if (options.skip) {
+			key += `:skip${options.skip}`;
+		}
+
 		const doc = await Container.tracker.getOrAdd(GitUri.fromFile(fileName, repoPath!, options.ref));
-		if (this.useCaching && options.range === undefined) {
-			if (doc.state !== undefined) {
+		if (this.useCaching && options.range == null) {
+			if (doc.state != null) {
 				const cachedLog = doc.state.get<CachedLog>(key);
-				if (cachedLog !== undefined) {
+				if (cachedLog != null) {
 					Logger.debug(cc, `Cache hit: '${key}'`);
 					return cachedLog.item;
 				}
 
-				if (options.ref !== undefined || options.limit !== undefined) {
+				if (options.ref != null || options.limit != null) {
 					// Since we are looking for partial log, see if we have the log of the whole file
 					const cachedLog = doc.state.get<CachedLog>(
-						`log${options.renames ? ':follow' : emptyStr}${options.reverse ? ':reverse' : emptyStr}`
+						`log${options.renames ? ':follow' : emptyStr}${options.reverse ? ':reverse' : emptyStr}`,
 					);
-					if (cachedLog !== undefined) {
-						if (options.ref === undefined) {
+					if (cachedLog != null) {
+						if (options.ref == null) {
 							Logger.debug(cc, `Cache hit: ~'${key}'`);
 							return cachedLog.item;
 						}
 
 						Logger.debug(cc, `Cache ?: '${key}'`);
 						let log = await cachedLog.item;
-						if (log !== undefined && !log.hasMore && log.commits.has(options.ref)) {
+						if (log != null && !log.hasMore && log.commits.has(options.ref)) {
 							Logger.debug(cc, `Cache hit: '${key}'`);
 
 							// Create a copy of the log starting at the requested commit
@@ -1768,14 +2258,14 @@ export class GitService implements Disposable {
 										}
 
 										i++;
-										if (options.limit !== undefined && i > options.limit) {
+										if (options.limit != null && i > options.limit) {
 											return undefined;
 										}
 
 										authors.set(c.author, log.authors.get(c.author)!);
 										return [ref, c];
-									}
-								)
+									},
+								),
 							);
 
 							const opts = { ...options };
@@ -1786,7 +2276,7 @@ export class GitService implements Disposable {
 								commits: commits,
 								authors: authors,
 								query: (limit: number | undefined) =>
-									this.getLogForFile(repoPath, fileName, { ...opts, limit: limit })
+									this.getLogForFile(repoPath, fileName, { ...opts, limit: limit }),
 							};
 
 							return log;
@@ -1797,18 +2287,18 @@ export class GitService implements Disposable {
 
 			Logger.debug(cc, `Cache miss: '${key}'`);
 
-			if (doc.state === undefined) {
+			if (doc.state == null) {
 				doc.state = new GitDocumentState(doc.key);
 			}
 		}
 
 		const promise = this.getLogForFileCore(repoPath, fileName, options, doc, key, cc);
 
-		if (doc.state !== undefined && options.range === undefined) {
+		if (doc.state != null && options.range == null) {
 			Logger.debug(cc, `Cache add: '${key}'`);
 
 			const value: CachedLog = {
-				item: promise as Promise<GitLog>
+				item: promise as Promise<GitLog>,
 			};
 			doc.state.set<CachedLog>(key, value);
 		}
@@ -1823,10 +2313,19 @@ export class GitService implements Disposable {
 			ref,
 			range,
 			...options
-		}: { limit?: number; range?: Range; ref?: string; renames?: boolean; reverse?: boolean },
+		}: {
+			all?: boolean;
+			limit?: number;
+			range?: Range;
+			ref?: string;
+			renames?: boolean;
+			reverse?: boolean;
+			since?: string;
+			skip?: number;
+		},
 		document: TrackedDocument<GitDocumentState>,
 		key: string,
-		cc: LogCorrelationContext | undefined
+		cc: LogCorrelationContext | undefined,
 	): Promise<GitLog | undefined> {
 		if (!(await this.isTracked(fileName, repoPath, { ref: ref }))) {
 			Logger.log(cc, `Skipping log; '${fileName}' is not tracked`);
@@ -1836,14 +2335,15 @@ export class GitService implements Disposable {
 		const [file, root] = Git.splitPath(fileName, repoPath, false);
 
 		try {
-			if (range !== undefined && range.start.line > range.end.line) {
+			if (range != null && range.start.line > range.end.line) {
 				range = new Range(range.end, range.start);
 			}
 
 			const data = await Git.log__file(root, file, ref, {
 				...options,
-				startLine: range === undefined ? undefined : range.start.line + 1,
-				endLine: range === undefined ? undefined : range.end.line + 1
+				firstParent: options.renames,
+				startLine: range == null ? undefined : range.start.line + 1,
+				endLine: range == null ? undefined : range.end.line + 1,
 			});
 			const log = GitLogParser.parse(
 				data,
@@ -1854,10 +2354,10 @@ export class GitService implements Disposable {
 				await this.getCurrentUser(root),
 				options.limit,
 				options.reverse!,
-				range
+				range,
 			);
 
-			if (log !== undefined) {
+			if (log != null) {
 				const opts = { ...options, ref: ref, range: range };
 				log.query = (limit: number | undefined) =>
 					this.getLogForFile(repoPath, fileName, { ...opts, limit: limit });
@@ -1869,13 +2369,13 @@ export class GitService implements Disposable {
 			return log;
 		} catch (ex) {
 			// Trap and cache expected log errors
-			if (document.state !== undefined && range === undefined && !options.reverse) {
-				const msg = ex && ex.toString();
+			if (document.state != null && range == null && !options.reverse) {
+				const msg: string = ex?.toString() ?? '';
 				Logger.debug(cc, `Cache replace (with empty promise): '${key}'`);
 
 				const value: CachedLog = {
 					item: emptyPromise as Promise<GitLog>,
-					errorMessage: msg
+					errorMessage: msg,
 				};
 				document.state.set<CachedLog>(key, value);
 
@@ -1889,7 +2389,7 @@ export class GitService implements Disposable {
 	private getLogForFileMoreFn(
 		log: GitLog,
 		fileName: string,
-		options: { limit?: number; range?: Range; ref?: string; renames?: boolean; reverse?: boolean }
+		options: { all?: boolean; limit?: number; range?: Range; ref?: string; renames?: boolean; reverse?: boolean },
 	): (limit: number | { until: string } | undefined) => Promise<GitLog> {
 		return async (limit: number | { until: string } | undefined) => {
 			const moreUntil = limit != null && typeof limit === 'object' ? limit.until : undefined;
@@ -1905,49 +2405,54 @@ export class GitService implements Disposable {
 			const moreLog = await this.getLogForFile(log.repoPath, fileName, {
 				...options,
 				limit: moreUntil == null ? moreLimit : 0,
-				ref: moreUntil == null ? `${ref}^` : `${moreUntil}^..${ref}^`
+				ref: options.all ? undefined : moreUntil == null ? `${ref}^` : `${moreUntil}^..${ref}^`,
+				skip: options.all ? log.count : undefined,
 			});
-			if (moreLog === undefined) {
+			if (moreLog == null) {
 				// If we can't find any more, assume we have everything
 				return { ...log, hasMore: false };
 			}
 
+			// Merge authors
+			const authors = new Map([...log.authors]);
+			for (const [key, addAuthor] of moreLog.authors) {
+				const author = authors.get(key);
+				if (author == null) {
+					authors.set(key, addAuthor);
+				} else {
+					author.lineCount += addAuthor.lineCount;
+				}
+			}
+
+			const commits = new Map([...log.commits, ...moreLog.commits]);
+
 			const mergedLog: GitLog = {
 				repoPath: log.repoPath,
-				authors: new Map([...log.authors, ...moreLog.authors]),
-				commits: new Map([...log.commits, ...moreLog.commits]),
+				authors: authors,
+				commits: commits,
 				sha: log.sha,
 				range: log.range,
-				count: log.count + moreLog.count,
+				count: commits.size,
 				limit: moreUntil == null ? (log.limit ?? 0) + moreLimit : undefined,
 				hasMore: moreUntil == null ? moreLog.hasMore : true,
 				query: (limit: number | undefined) =>
-					this.getLogForFile(log.repoPath, fileName, { ...options, limit: limit })
+					this.getLogForFile(log.repoPath, fileName, { ...options, limit: limit }),
 			};
+
+			if (options.renames) {
+				const renamed = Iterables.find(
+					moreLog.commits.values(),
+					c => Boolean(c.originalFileName) && c.originalFileName !== fileName,
+				);
+				if (renamed != null) {
+					fileName = renamed.originalFileName!;
+				}
+			}
+
 			mergedLog.more = this.getLogForFileMoreFn(mergedLog, fileName, options);
 
 			return mergedLog;
 		};
-	}
-
-	@log()
-	async hasRemotes(repoPath: string | undefined): Promise<boolean> {
-		if (repoPath === undefined) return false;
-
-		const repository = await this.getRepository(repoPath);
-		if (repository === undefined) return false;
-
-		return repository.hasRemotes();
-	}
-
-	@log()
-	async hasTrackingBranch(repoPath: string | undefined): Promise<boolean> {
-		if (repoPath === undefined) return false;
-
-		const repository = await this.getRepository(repoPath);
-		if (repository === undefined) return false;
-
-		return repository.hasTrackingBranch();
 	}
 
 	@log()
@@ -1956,13 +2461,129 @@ export class GitService implements Disposable {
 
 		try {
 			const data = await Git.merge_base(repoPath, ref1, ref2, options);
-			if (data === undefined) return undefined;
+			if (data == null) return undefined;
 
-			return data.split('\n')[0];
+			return data.split('\n')[0].trim() || undefined;
 		} catch (ex) {
 			Logger.error(ex, cc);
 			return undefined;
 		}
+	}
+
+	@gate()
+	@log()
+	async getMergeStatus(repoPath: string): Promise<GitMergeStatus | undefined> {
+		let status = this.useCaching ? this._mergeStatusCache.get(repoPath) : undefined;
+		if (status === undefined) {
+			const merge = await Git.rev_parse__verify(repoPath, 'MERGE_HEAD');
+			if (merge != null) {
+				const [branch, mergeBase, possibleSourceBranches] = await Promise.all([
+					this.getBranch(repoPath),
+					this.getMergeBase(repoPath, 'MERGE_HEAD', 'HEAD'),
+					this.getCommitBranches(repoPath, 'MERGE_HEAD', { mode: 'pointsAt' }),
+				]);
+
+				status = {
+					type: 'merge',
+					repoPath: repoPath,
+					mergeBase: mergeBase,
+					HEAD: GitReference.create(merge, repoPath, { refType: 'revision' }),
+					current: GitReference.fromBranch(branch!),
+					incoming:
+						possibleSourceBranches?.length === 1
+							? GitReference.create(possibleSourceBranches[0], repoPath, {
+									refType: 'branch',
+									name: possibleSourceBranches[0],
+									remote: false,
+							  })
+							: undefined,
+				};
+			}
+
+			const repo = await this.getRepository(repoPath);
+			if (repo?.supportsChangeEvents) {
+				this._mergeStatusCache.set(repoPath, status ?? null);
+			}
+		}
+
+		return status ?? undefined;
+	}
+
+	@gate()
+	@log()
+	async getRebaseStatus(repoPath: string): Promise<GitRebaseStatus | undefined> {
+		let status = this.useCaching ? this._rebaseStatusCache.get(repoPath) : undefined;
+		if (status === undefined) {
+			const rebase = await Git.rev_parse__verify(repoPath, 'REBASE_HEAD');
+			if (rebase != null) {
+				// eslint-disable-next-line prefer-const
+				let [mergeBase, branch, onto, stepsNumber, stepsMessage, stepsTotal] = await Promise.all([
+					this.getMergeBase(repoPath, 'REBASE_HEAD', 'HEAD'),
+					Git.readDotGitFile(repoPath, ['rebase-merge', 'head-name']),
+					Git.readDotGitFile(repoPath, ['rebase-merge', 'onto']),
+					Git.readDotGitFile(repoPath, ['rebase-merge', 'msgnum'], { numeric: true }),
+					Git.readDotGitFile(repoPath, ['rebase-merge', 'message'], { throw: true }).catch(() =>
+						Git.readDotGitFile(repoPath, ['rebase-merge', 'message-squashed']),
+					),
+					Git.readDotGitFile(repoPath, ['rebase-merge', 'end'], { numeric: true }),
+				]);
+
+				if (branch == null || onto == null) return undefined;
+
+				if (branch.startsWith('refs/heads/')) {
+					branch = branch.substr(11).trim();
+				}
+
+				const possibleSourceBranches = await this.getCommitBranches(repoPath, onto, { mode: 'pointsAt' });
+
+				let possibleSourceBranch: string | undefined;
+				for (const b of possibleSourceBranches) {
+					if (b.startsWith('(no branch, rebasing')) continue;
+
+					possibleSourceBranch = b;
+					break;
+				}
+
+				status = {
+					type: 'rebase',
+					repoPath: repoPath,
+					mergeBase: mergeBase,
+					HEAD: GitReference.create(rebase, repoPath, { refType: 'revision' }),
+					onto: GitReference.create(onto, repoPath, { refType: 'revision' }),
+					current:
+						possibleSourceBranch != null
+							? GitReference.create(possibleSourceBranch, repoPath, {
+									refType: 'branch',
+									name: possibleSourceBranch,
+									remote: false,
+							  })
+							: undefined,
+
+					incoming: GitReference.create(branch, repoPath, {
+						refType: 'branch',
+						name: branch,
+						remote: false,
+					}),
+					steps: {
+						current: {
+							number: stepsNumber ?? 0,
+							commit: GitReference.create(rebase, repoPath, {
+								refType: 'revision',
+								message: stepsMessage,
+							}),
+						},
+						total: stepsTotal ?? 0,
+					},
+				};
+			}
+
+			const repo = await this.getRepository(repoPath);
+			if (repo?.supportsChangeEvents) {
+				this._rebaseStatusCache.set(repoPath, status ?? null);
+			}
+		}
+
+		return status ?? undefined;
 	}
 
 	@log()
@@ -1970,36 +2591,36 @@ export class GitService implements Disposable {
 		repoPath: string,
 		uri: Uri,
 		ref: string | undefined,
-		skip: number = 0
+		skip: number = 0,
 	): Promise<{ current: GitUri; next: GitUri | undefined; deleted?: boolean } | undefined> {
 		// If we have no ref (or staged ref) there is no next commit
-		if (ref === undefined || ref.length === 0) return undefined;
+		if (ref == null || ref.length === 0) return undefined;
 
 		const fileName = GitUri.relativeTo(uri, repoPath);
 
-		if (Git.isUncommittedStaged(ref)) {
+		if (GitRevision.isUncommittedStaged(ref)) {
 			return {
 				current: GitUri.fromFile(fileName, repoPath, ref),
-				next: GitUri.fromFile(fileName, repoPath, undefined)
+				next: GitUri.fromFile(fileName, repoPath, undefined),
 			};
 		}
 
 		const next = await this.getNextUri(repoPath, uri, ref, skip);
-		if (next === undefined) {
+		if (next == null) {
 			const status = await this.getStatusForFile(repoPath, fileName);
-			if (status !== undefined) {
+			if (status != null) {
 				// If the file is staged, diff with the staged version
-				if (status.indexStatus !== undefined) {
+				if (status.indexStatus != null) {
 					return {
 						current: GitUri.fromFile(fileName, repoPath, ref),
-						next: GitUri.fromFile(fileName, repoPath, GitService.uncommittedStagedSha)
+						next: GitUri.fromFile(fileName, repoPath, GitRevision.uncommittedStaged),
 					};
 				}
 			}
 
 			return {
 				current: GitUri.fromFile(fileName, repoPath, ref),
-				next: GitUri.fromFile(fileName, repoPath, undefined)
+				next: GitUri.fromFile(fileName, repoPath, undefined),
 			};
 		}
 
@@ -2008,7 +2629,7 @@ export class GitService implements Disposable {
 				skip === 0
 					? GitUri.fromFile(fileName, repoPath, ref)
 					: (await this.getNextUri(repoPath, uri, ref, skip - 1))!,
-			next: next
+			next: next,
 		};
 	}
 
@@ -2017,14 +2638,14 @@ export class GitService implements Disposable {
 		repoPath: string,
 		uri: Uri,
 		ref?: string,
-		skip: number = 0
+		skip: number = 0,
 		// editorLine?: number
 	): Promise<GitUri | undefined> {
 		// If we have no ref (or staged ref) there is no next commit
-		if (ref === undefined || ref.length === 0 || Git.isUncommittedStaged(ref)) return undefined;
+		if (ref == null || ref.length === 0 || GitRevision.isUncommittedStaged(ref)) return undefined;
 
-		let filters: GitLogDiffFilter[] | undefined;
-		if (ref === GitService.deletedOrMissingSha) {
+		let filters: GitDiffFilter[] | undefined;
+		if (ref === GitRevision.deletedOrMissing) {
 			// If we are trying to move next from a deleted or missing ref then get the first commit
 			ref = undefined;
 			filters = ['A'];
@@ -2034,9 +2655,9 @@ export class GitService implements Disposable {
 		let data = await Git.log__file(repoPath, fileName, ref, {
 			filters: filters,
 			limit: skip + 1,
-			// startLine: editorLine !== undefined ? editorLine + 1 : undefined,
+			// startLine: editorLine != null ? editorLine + 1 : undefined,
 			reverse: true,
-			simple: true
+			format: 'simple',
 		});
 		if (data == null || data.length === 0) return undefined;
 
@@ -2044,24 +2665,24 @@ export class GitService implements Disposable {
 		// If the file was deleted, check for a possible rename
 		if (status === 'D') {
 			data = await Git.log__file(repoPath, '.', nextRef, {
-				filters: ['R'],
+				filters: ['R', 'C'],
 				limit: 1,
-				// startLine: editorLine !== undefined ? editorLine + 1 : undefined
-				simple: true
+				// startLine: editorLine != null ? editorLine + 1 : undefined
+				format: 'simple',
 			});
 			if (data == null || data.length === 0) {
-				return GitUri.fromFile(file || fileName, repoPath, nextRef);
+				return GitUri.fromFile(file ?? fileName, repoPath, nextRef);
 			}
 
-			const [nextRenamedRef, renamedFile] = GitLogParser.parseSimpleRenamed(data, file || fileName);
+			const [nextRenamedRef, renamedFile] = GitLogParser.parseSimpleRenamed(data, file ?? fileName);
 			return GitUri.fromFile(
-				renamedFile || file || fileName,
+				renamedFile ?? file ?? fileName,
 				repoPath,
-				nextRenamedRef || nextRef || GitService.deletedOrMissingSha
+				nextRenamedRef ?? nextRef ?? GitRevision.deletedOrMissing,
 			);
 		}
 
-		return GitUri.fromFile(file || fileName, repoPath, nextRef);
+		return GitUri.fromFile(file ?? fileName, repoPath, nextRef);
 	}
 
 	@log()
@@ -2070,22 +2691,22 @@ export class GitService implements Disposable {
 		uri: Uri,
 		ref: string | undefined,
 		skip: number = 0,
-		firstParent: boolean = false
+		firstParent: boolean = false,
 	): Promise<{ current: GitUri; previous: GitUri | undefined } | undefined> {
-		if (ref === GitService.deletedOrMissingSha) return undefined;
+		if (ref === GitRevision.deletedOrMissing) return undefined;
 
 		const fileName = GitUri.relativeTo(uri, repoPath);
 
 		// If we are at the working tree (i.e. no ref), we need to dig deeper to figure out where to go
-		if (ref === undefined || ref.length === 0) {
+		if (ref == null || ref.length === 0) {
 			// First, check the file status to see if there is anything staged
 			const status = await this.getStatusForFile(repoPath, fileName);
-			if (status !== undefined) {
+			if (status != null) {
 				// If the file is staged with working changes, diff working with staged (index)
 				// If the file is staged without working changes, diff staged with HEAD
-				if (status.indexStatus !== undefined) {
+				if (status.indexStatus != null) {
 					// Backs up to get to HEAD
-					if (status.workingTreeStatus === undefined) {
+					if (status.workingTreeStatus == null) {
 						skip++;
 					}
 
@@ -2093,20 +2714,20 @@ export class GitService implements Disposable {
 						// Diff working with staged
 						return {
 							current: GitUri.fromFile(fileName, repoPath, undefined),
-							previous: GitUri.fromFile(fileName, repoPath, GitService.uncommittedStagedSha)
+							previous: GitUri.fromFile(fileName, repoPath, GitRevision.uncommittedStaged),
 						};
 					}
 
 					return {
 						// Diff staged with HEAD (or prior if more skips)
-						current: GitUri.fromFile(fileName, repoPath, GitService.uncommittedStagedSha),
-						previous: await this.getPreviousUri(repoPath, uri, ref, skip - 1, undefined, firstParent)
+						current: GitUri.fromFile(fileName, repoPath, GitRevision.uncommittedStaged),
+						previous: await this.getPreviousUri(repoPath, uri, ref, skip - 1, undefined, firstParent),
 					};
-				} else if (status.workingTreeStatus !== undefined) {
+				} else if (status.workingTreeStatus != null) {
 					if (skip === 0) {
 						return {
 							current: GitUri.fromFile(fileName, repoPath, undefined),
-							previous: await this.getPreviousUri(repoPath, uri, undefined, skip, undefined, firstParent)
+							previous: await this.getPreviousUri(repoPath, uri, undefined, skip, undefined, firstParent),
 						};
 					}
 				}
@@ -2115,16 +2736,16 @@ export class GitService implements Disposable {
 			}
 		}
 		// If we are at the index (staged), diff staged with HEAD
-		else if (GitService.isUncommittedStaged(ref)) {
+		else if (GitRevision.isUncommittedStaged(ref)) {
 			const current =
 				skip === 0
 					? GitUri.fromFile(fileName, repoPath, ref)
 					: (await this.getPreviousUri(repoPath, uri, undefined, skip - 1, undefined, firstParent))!;
-			if (current === undefined || current.sha === GitService.deletedOrMissingSha) return undefined;
+			if (current == null || current.sha === GitRevision.deletedOrMissing) return undefined;
 
 			return {
 				current: current,
-				previous: await this.getPreviousUri(repoPath, uri, undefined, skip, undefined, firstParent)
+				previous: await this.getPreviousUri(repoPath, uri, undefined, skip, undefined, firstParent),
 			};
 		}
 
@@ -2133,11 +2754,11 @@ export class GitService implements Disposable {
 			skip === 0
 				? GitUri.fromFile(fileName, repoPath, ref)
 				: (await this.getPreviousUri(repoPath, uri, ref, skip - 1, undefined, firstParent))!;
-		if (current === undefined || current.sha === GitService.deletedOrMissingSha) return undefined;
+		if (current == null || current.sha === GitRevision.deletedOrMissing) return undefined;
 
 		return {
 			current: current,
-			previous: await this.getPreviousUri(repoPath, uri, ref, skip, undefined, firstParent)
+			previous: await this.getPreviousUri(repoPath, uri, ref, skip, undefined, firstParent),
 		};
 	}
 
@@ -2147,16 +2768,16 @@ export class GitService implements Disposable {
 		uri: Uri,
 		editorLine: number,
 		ref: string | undefined,
-		skip: number = 0
-	): Promise<{ current: GitUri; previous: GitUri | undefined } | undefined> {
-		if (ref === GitService.deletedOrMissingSha) return undefined;
+		skip: number = 0,
+	): Promise<{ current: GitUri; previous: GitUri | undefined; line: number } | undefined> {
+		if (ref === GitRevision.deletedOrMissing) return undefined;
 
 		let fileName = GitUri.relativeTo(uri, repoPath);
 
 		let previous;
 
 		// If we are at the working tree (i.e. no ref), we need to dig deeper to figure out where to go
-		if (ref === undefined || ref.length === 0) {
+		if (ref == null || ref.length === 0) {
 			// First, check the blame on the current line to see if there are any working/staged changes
 			const gitUri = new GitUri(uri, repoPath);
 
@@ -2164,7 +2785,7 @@ export class GitService implements Disposable {
 			const blameLine = document.isDirty
 				? await this.getBlameForLineContents(gitUri, editorLine, document.getText())
 				: await this.getBlameForLine(gitUri, editorLine);
-			if (blameLine === undefined) return undefined;
+			if (blameLine == null) return undefined;
 
 			// If line is uncommitted, we need to dig deeper to figure out where to go (because blame can't be trusted)
 			if (blameLine.commit.isUncommitted) {
@@ -2172,14 +2793,15 @@ export class GitService implements Disposable {
 				if (document.isDirty) {
 					// Check the file status to see if there is anything staged
 					const status = await this.getStatusForFile(repoPath, fileName);
-					if (status !== undefined) {
+					if (status != null) {
 						// If the file is staged, diff working with staged (index)
 						// If the file is not staged, diff working with HEAD
-						if (status.indexStatus !== undefined) {
+						if (status.indexStatus != null) {
 							// Diff working with staged
 							return {
 								current: GitUri.fromFile(fileName, repoPath, undefined),
-								previous: GitUri.fromFile(fileName, repoPath, GitService.uncommittedStagedSha)
+								previous: GitUri.fromFile(fileName, repoPath, GitRevision.uncommittedStaged),
+								line: editorLine,
 							};
 						}
 					}
@@ -2187,23 +2809,19 @@ export class GitService implements Disposable {
 					// Diff working with HEAD (or prior if more skips)
 					return {
 						current: GitUri.fromFile(fileName, repoPath, undefined),
-						previous: await this.getPreviousUri(repoPath, uri, undefined, skip, editorLine)
+						previous: await this.getPreviousUri(repoPath, uri, undefined, skip, editorLine),
+						line: editorLine,
 					};
 				}
 
 				// First, check if we have a diff in the working tree
 				let hunkLine = await this.getDiffForLine(gitUri, editorLine, undefined);
-				if (hunkLine === undefined) {
+				if (hunkLine == null) {
 					// Next, check if we have a diff in the index (staged)
-					hunkLine = await this.getDiffForLine(
-						gitUri,
-						editorLine,
-						undefined,
-						GitService.uncommittedStagedSha
-					);
+					hunkLine = await this.getDiffForLine(gitUri, editorLine, undefined, GitRevision.uncommittedStaged);
 
-					if (hunkLine !== undefined) {
-						ref = GitService.uncommittedStagedSha;
+					if (hunkLine != null) {
+						ref = GitRevision.uncommittedStaged;
 					} else {
 						skip++;
 					}
@@ -2212,7 +2830,7 @@ export class GitService implements Disposable {
 			// If line is committed, diff with line ref with previous
 			else {
 				ref = blameLine.commit.sha;
-				fileName = blameLine.commit.fileName || blameLine.commit.originalFileName || fileName;
+				fileName = blameLine.commit.fileName || (blameLine.commit.originalFileName ?? fileName);
 				uri = GitUri.resolveToUri(fileName, repoPath);
 				editorLine = blameLine.line.originalLine - 1;
 
@@ -2221,26 +2839,27 @@ export class GitService implements Disposable {
 				}
 			}
 		} else {
-			if (GitService.isUncommittedStaged(ref)) {
+			if (GitRevision.isUncommittedStaged(ref)) {
 				const current =
 					skip === 0
 						? GitUri.fromFile(fileName, repoPath, ref)
 						: (await this.getPreviousUri(repoPath, uri, undefined, skip - 1, editorLine))!;
-				if (current.sha === GitService.deletedOrMissingSha) return undefined;
+				if (current.sha === GitRevision.deletedOrMissing) return undefined;
 
 				return {
 					current: current,
-					previous: await this.getPreviousUri(repoPath, uri, undefined, skip, editorLine)
+					previous: await this.getPreviousUri(repoPath, uri, undefined, skip, editorLine),
+					line: editorLine,
 				};
 			}
 
 			const gitUri = new GitUri(uri, { repoPath: repoPath, sha: ref });
 			const blameLine = await this.getBlameForLine(gitUri, editorLine);
-			if (blameLine === undefined) return undefined;
+			if (blameLine == null) return undefined;
 
 			// Diff with line ref with previous
 			ref = blameLine.commit.sha;
-			fileName = blameLine.commit.fileName || blameLine.commit.originalFileName || fileName;
+			fileName = blameLine.commit.fileName || (blameLine.commit.originalFileName ?? fileName);
 			uri = GitUri.resolveToUri(fileName, repoPath);
 			editorLine = blameLine.line.originalLine - 1;
 
@@ -2253,11 +2872,12 @@ export class GitService implements Disposable {
 			skip === 0
 				? GitUri.fromFile(fileName, repoPath, ref)
 				: (await this.getPreviousUri(repoPath, uri, ref, skip - 1, editorLine))!;
-		if (current.sha === GitService.deletedOrMissingSha) return undefined;
+		if (current.sha === GitRevision.deletedOrMissing) return undefined;
 
 		return {
 			current: current,
-			previous: previous || (await this.getPreviousUri(repoPath, uri, ref, skip, editorLine))
+			previous: previous ?? (await this.getPreviousUri(repoPath, uri, ref, skip, editorLine)),
+			line: editorLine,
 		};
 	}
 
@@ -2268,13 +2888,13 @@ export class GitService implements Disposable {
 		ref?: string,
 		skip: number = 0,
 		editorLine?: number,
-		firstParent: boolean = false
+		firstParent: boolean = false,
 	): Promise<GitUri | undefined> {
-		if (ref === GitService.deletedOrMissingSha) return undefined;
+		if (ref === GitRevision.deletedOrMissing) return undefined;
 
 		const cc = Logger.getCorrelationContext();
 
-		if (ref === GitService.uncommittedSha) {
+		if (ref === GitRevision.uncommitted) {
 			ref = undefined;
 		}
 
@@ -2285,24 +2905,22 @@ export class GitService implements Disposable {
 			data = await Git.log__file(repoPath, fileName, ref, {
 				limit: skip + 2,
 				firstParent: firstParent,
-				simple: true,
-				startLine: editorLine !== undefined ? editorLine + 1 : undefined
+				format: 'simple',
+				startLine: editorLine != null ? editorLine + 1 : undefined,
 			});
 		} catch (ex) {
+			const msg: string = ex?.toString() ?? emptyStr;
 			// If the line count is invalid just fallback to the most recent commit
-			if (
-				(ref === undefined || GitService.isUncommittedStaged(ref)) &&
-				GitErrors.invalidLineCount.test(ex.message)
-			) {
-				if (ref === undefined) {
+			if ((ref == null || GitRevision.isUncommittedStaged(ref)) && GitErrors.invalidLineCount.test(msg)) {
+				if (ref == null) {
 					const status = await this.getStatusForFile(repoPath, fileName);
-					if (status !== undefined && status.indexStatus !== undefined) {
-						return GitUri.fromFile(fileName, repoPath, GitService.uncommittedStagedSha);
+					if (status?.indexStatus != null) {
+						return GitUri.fromFile(fileName, repoPath, GitRevision.uncommittedStaged);
 					}
 				}
 
 				ref = await Git.log__file_recent(repoPath, fileName);
-				return GitUri.fromFile(fileName, repoPath, ref || GitService.deletedOrMissingSha);
+				return GitUri.fromFile(fileName, repoPath, ref ?? GitRevision.deletedOrMissing);
 			}
 
 			Logger.error(ex, cc);
@@ -2312,15 +2930,118 @@ export class GitService implements Disposable {
 
 		const [previousRef, file] = GitLogParser.parseSimple(data, skip, ref);
 		// If the previous ref matches the ref we asked for assume we are at the end of the history
-		if (ref !== undefined && ref === previousRef) return undefined;
+		if (ref != null && ref === previousRef) return undefined;
 
-		return GitUri.fromFile(file || fileName, repoPath, previousRef || GitService.deletedOrMissingSha);
+		return GitUri.fromFile(file ?? fileName, repoPath, previousRef ?? GitRevision.deletedOrMissing);
+	}
+
+	async getPullRequestForBranch(
+		branch: string,
+		remote: GitRemote,
+		options?: { avatarSize?: number; include?: PullRequestState[]; limit?: number; timeout?: number },
+	): Promise<PullRequest | undefined>;
+	async getPullRequestForBranch(
+		branch: string,
+		provider: RichRemoteProvider,
+		options?: { avatarSize?: number; include?: PullRequestState[]; limit?: number; timeout?: number },
+	): Promise<PullRequest | undefined>;
+	@gate()
+	@debug<GitService['getPullRequestForBranch']>({
+		args: {
+			1: (remoteOrProvider: GitRemote | RichRemoteProvider) => remoteOrProvider.name,
+		},
+	})
+	async getPullRequestForBranch(
+		branch: string,
+		remoteOrProvider: GitRemote | RichRemoteProvider,
+		{
+			timeout,
+			...options
+		}: { avatarSize?: number; include?: PullRequestState[]; limit?: number; timeout?: number } = {},
+	): Promise<PullRequest | undefined> {
+		let provider;
+		if (GitRemote.is(remoteOrProvider)) {
+			({ provider } = remoteOrProvider);
+			if (!provider?.hasApi()) return undefined;
+		} else {
+			provider = remoteOrProvider;
+		}
+
+		let promiseOrPR = provider.getPullRequestForBranch(branch, options);
+		if (promiseOrPR == null || !Promises.is(promiseOrPR)) {
+			return promiseOrPR;
+		}
+
+		if (timeout != null && timeout > 0) {
+			promiseOrPR = Promises.cancellable(promiseOrPR, timeout);
+		}
+
+		try {
+			return await promiseOrPR;
+		} catch (ex) {
+			if (ex instanceof Promises.CancellationError) {
+				throw ex;
+			}
+
+			return undefined;
+		}
+	}
+
+	async getPullRequestForCommit(
+		ref: string,
+		remote: GitRemote,
+		options?: { timeout?: number },
+	): Promise<PullRequest | undefined>;
+	async getPullRequestForCommit(
+		ref: string,
+		provider: RichRemoteProvider,
+		options?: { timeout?: number },
+	): Promise<PullRequest | undefined>;
+	@gate()
+	@debug({
+		args: {
+			1: (remoteOrProvider: GitRemote | RichRemoteProvider) => remoteOrProvider.name,
+		},
+	})
+	async getPullRequestForCommit(
+		ref: string,
+		remoteOrProvider: GitRemote | RichRemoteProvider,
+		{ timeout }: { timeout?: number } = {},
+	): Promise<PullRequest | undefined> {
+		if (GitRevision.isUncommitted(ref)) return undefined;
+
+		let provider;
+		if (GitRemote.is(remoteOrProvider)) {
+			({ provider } = remoteOrProvider);
+			if (!provider?.hasApi()) return undefined;
+		} else {
+			provider = remoteOrProvider;
+		}
+
+		let promiseOrPR = provider.getPullRequestForCommit(ref);
+		if (promiseOrPR == null || !Promises.is(promiseOrPR)) {
+			return promiseOrPR;
+		}
+
+		if (timeout != null && timeout > 0) {
+			promiseOrPR = Promises.cancellable(promiseOrPR, timeout);
+		}
+
+		try {
+			return await promiseOrPR;
+		} catch (ex) {
+			if (ex instanceof Promises.CancellationError) {
+				throw ex;
+			}
+
+			return undefined;
+		}
 	}
 
 	@log()
 	async getIncomingActivity(
 		repoPath: string,
-		{ limit, ...options }: { all?: boolean; branch?: string; limit?: number; skip?: number } = {}
+		{ limit, ...options }: { all?: boolean; branch?: string; limit?: number; skip?: number } = {},
 	): Promise<GitReflog | undefined> {
 		const cc = Logger.getCorrelationContext();
 
@@ -2328,7 +3049,7 @@ export class GitService implements Disposable {
 		try {
 			// Pass a much larger limit to reflog, because we aggregate the data and we won't know how many lines we'll need
 			const data = await Git.reflog(repoPath, { ...options, limit: limit * 100 });
-			if (data === undefined) return undefined;
+			if (data == null) return undefined;
 
 			const reflog = GitReflogParser.parse(data, repoPath, reflogCommands, limit, limit * 100);
 			if (reflog?.hasMore) {
@@ -2344,7 +3065,7 @@ export class GitService implements Disposable {
 
 	private getReflogMoreFn(
 		reflog: GitReflog,
-		options: { all?: boolean; branch?: string; limit?: number; skip?: number }
+		options: { all?: boolean; branch?: string; limit?: number; skip?: number },
 	): (limit: number) => Promise<GitReflog> {
 		return async (limit: number | undefined) => {
 			limit = limit ?? Container.config.advanced.maxSearchItems ?? 0;
@@ -2352,9 +3073,9 @@ export class GitService implements Disposable {
 			const moreLog = await this.getIncomingActivity(reflog.repoPath, {
 				...options,
 				limit: limit,
-				skip: reflog.total
+				skip: reflog.total,
 			});
-			if (moreLog === undefined) {
+			if (moreLog == null) {
 				// If we can't find any more, assume we have everything
 				return { ...reflog, hasMore: false };
 			}
@@ -2365,7 +3086,7 @@ export class GitService implements Disposable {
 				count: reflog.count + moreLog.count,
 				total: reflog.total + moreLog.total,
 				limit: (reflog.limit ?? 0) + limit,
-				hasMore: moreLog.hasMore
+				hasMore: moreLog.hasMore,
 			};
 			mergedLog.more = this.getReflogMoreFn(mergedLog, options);
 
@@ -2373,36 +3094,111 @@ export class GitService implements Disposable {
 		};
 	}
 
+	async getRichRemoteProvider(
+		repoPath: string | undefined,
+		options?: { includeDisconnected?: boolean },
+	): Promise<GitRemote<RichRemoteProvider> | undefined>;
+	async getRichRemoteProvider(
+		remotes: GitRemote[],
+		options?: { includeDisconnected?: boolean },
+	): Promise<GitRemote<RichRemoteProvider> | undefined>;
+	@gate<GitService['getRichRemoteProvider']>(
+		(remotesOrRepoPath, options) =>
+			`${typeof remotesOrRepoPath === 'string' ? remotesOrRepoPath : remotesOrRepoPath[0]?.repoPath}:${
+				options?.includeDisconnected ?? false
+			}`,
+	)
+	@log({ args: { 0: () => false } })
+	async getRichRemoteProvider(
+		remotesOrRepoPath: GitRemote[] | string | undefined,
+		{ includeDisconnected }: { includeDisconnected?: boolean } = {},
+	): Promise<GitRemote<RichRemoteProvider> | undefined> {
+		if (remotesOrRepoPath == null) return undefined;
+
+		const cacheKey = `${includeDisconnected ? 'disconnected|' : ''}${
+			typeof remotesOrRepoPath === 'string' ? remotesOrRepoPath : remotesOrRepoPath[0]?.repoPath
+		}`;
+		if (cacheKey != null) {
+			const remote = this._remotesWithApiProviderCache.get(cacheKey);
+			if (remote !== undefined) return remote ?? undefined;
+		}
+
+		const remotes = (typeof remotesOrRepoPath === 'string'
+			? await this.getRemotes(remotesOrRepoPath)
+			: remotesOrRepoPath
+		).filter(r => r.provider != null);
+
+		let remote;
+		if (remotes.length === 1) {
+			remote = remotes[0];
+		} else {
+			let originRemote;
+			for (const r of remotes) {
+				if (r.default) {
+					remote = r;
+					break;
+				}
+
+				if (r.name === 'origin') {
+					originRemote = r;
+				}
+			}
+
+			remote = remote ?? originRemote ?? null;
+		}
+
+		if (!remote?.provider?.hasApi()) {
+			if (cacheKey != null) {
+				this._remotesWithApiProviderCache.set(cacheKey, null);
+			}
+			return undefined;
+		}
+
+		const { provider } = remote;
+		if (!includeDisconnected) {
+			const connected = provider.maybeConnected ?? (await provider.isConnected());
+			if (!connected) {
+				if (cacheKey != null) {
+					this._remotesWithApiProviderCache.set(cacheKey, null);
+				}
+				return undefined;
+			}
+		}
+
+		if (cacheKey != null) {
+			this._remotesWithApiProviderCache.set(cacheKey, remote as GitRemote<RichRemoteProvider>);
+		}
+		return remote as GitRemote<RichRemoteProvider>;
+	}
+
 	@log()
 	async getRemotes(
 		repoPath: string | undefined,
-		options: { includeAll?: boolean; sort?: boolean } = {}
-	): Promise<GitRemote[]> {
-		if (repoPath === undefined) return [];
+		options: { sort?: boolean } = {},
+	): Promise<GitRemote<RemoteProvider>[]> {
+		if (repoPath == null) return [];
 
 		const repository = await this.getRepository(repoPath);
-		const remotes = await (repository !== undefined
+		const remotes = await (repository != null
 			? repository.getRemotes({ sort: options.sort })
 			: this.getRemotesCore(repoPath, undefined, { sort: options.sort }));
 
-		if (options.includeAll) return remotes;
-
-		return remotes.filter(r => r.provider !== undefined);
+		return remotes.filter(r => r.provider != null) as GitRemote<RemoteProvider>[];
 	}
 
 	async getRemotesCore(
 		repoPath: string | undefined,
 		providers?: RemoteProviders,
-		options: { sort?: boolean } = {}
+		options: { sort?: boolean } = {},
 	): Promise<GitRemote[]> {
-		if (repoPath === undefined) return [];
+		if (repoPath == null) return [];
 
-		providers = providers || RemoteProviderFactory.loadProviders(configuration.get('remotes', null));
+		providers = providers ?? RemoteProviderFactory.loadProviders(configuration.get('remotes', null));
 
 		try {
 			const data = await Git.remote(repoPath);
 			const remotes = GitRemoteParser.parse(data, repoPath, RemoteProviderFactory.factory(providers));
-			if (remotes === undefined) return [];
+			if (remotes == null) return [];
 
 			if (options.sort) {
 				GitRemote.sort(remotes);
@@ -2418,11 +3214,11 @@ export class GitService implements Disposable {
 	async getRepoPath(filePath: string, options?: { ref?: string }): Promise<string | undefined>;
 	async getRepoPath(uri: Uri | undefined, options?: { ref?: string }): Promise<string | undefined>;
 	@log<GitService['getRepoPath']>({
-		exit: path => `returned ${path}`
+		exit: path => `returned ${path}`,
 	})
 	async getRepoPath(
 		filePathOrUri: string | Uri | undefined,
-		options: { ref?: string } = {}
+		options: { ref?: string } = {},
 	): Promise<string | undefined> {
 		if (filePathOrUri == null) return this.getHighlanderRepoPath();
 		if (GitUri.is(filePathOrUri)) return filePathOrUri.repoPath;
@@ -2431,16 +3227,16 @@ export class GitService implements Disposable {
 
 		// Don't save the tracking info to the cache, because we could be looking in the wrong place (e.g. looking in the root when the file is in a submodule)
 		let repo = await this.getRepository(filePathOrUri, { ...options, skipCacheUpdate: true });
-		if (repo !== undefined) return repo.path;
+		if (repo != null) return repo.path;
 
 		const rp = await this.getRepoPathCore(
 			typeof filePathOrUri === 'string' ? filePathOrUri : filePathOrUri.fsPath,
-			false
+			false,
 		);
-		if (rp === undefined) return undefined;
+		if (rp == null) return undefined;
 
 		// Recheck this._repositoryTree.get(rp) to make sure we haven't already tried adding this due to awaits
-		if (this._repositoryTree.get(rp) !== undefined) return rp;
+		if (this._repositoryTree.get(rp) != null) return rp;
 
 		const isVslsScheme =
 			typeof filePathOrUri === 'string' ? undefined : filePathOrUri.scheme === DocumentSchemes.Vsls;
@@ -2449,24 +3245,24 @@ export class GitService implements Disposable {
 		const root = this.findRepositoryForPath(this._repositoryTree, rp, isVslsScheme);
 
 		let folder;
-		if (root !== undefined) {
+		if (root != null) {
 			// Not sure why I added this for vsls (I can't see a reason for it anymore), but if it is added it will break submodules
 			// rp = root.path;
 			folder = root.folder;
 		} else {
 			folder = workspace.getWorkspaceFolder(GitUri.file(rp, isVslsScheme));
-			if (folder === undefined) {
+			if (folder == null) {
 				const parts = rp.split(slash);
 				folder = {
 					uri: GitUri.file(rp, isVslsScheme),
 					name: parts[parts.length - 1],
-					index: this._repositoryTree.count()
+					index: this._repositoryTree.count(),
 				};
 			}
 		}
 
 		Logger.log(cc, `Repository found in '${rp}'`);
-		repo = new Repository(folder, rp, false, this.onAnyRepositoryChanged.bind(this), this._suspended);
+		repo = new Repository(folder, rp, false, this.onAnyRepositoryChanged.bind(this), !window.state.focused);
 		this._repositoryTree.set(rp, repo);
 
 		// Send a notification that the repositories changed
@@ -2483,15 +3279,51 @@ export class GitService implements Disposable {
 	private async getRepoPathCore(filePath: string, isDirectory: boolean): Promise<string | undefined> {
 		const cc = Logger.getCorrelationContext();
 
+		let repoPath: string | undefined;
 		try {
 			const path = isDirectory ? filePath : paths.dirname(filePath);
 
-			let repoPath = await Git.rev_parse__show_toplevel(path);
-			if (repoPath === undefined || isWindows) return repoPath;
+			repoPath = await Git.rev_parse__show_toplevel(path);
+			if (repoPath == null) return repoPath;
+
+			if (isWindows) {
+				// On Git 2.25+ if you call `rev-parse --show-toplevel` on a mapped drive, instead of getting the mapped drive path back, you get the UNC path for the mapped drive.
+				// So try to normalize it back to the mapped drive path, if possible
+
+				const repoUri = Uri.file(repoPath);
+				const pathUri = Uri.file(path);
+				if (repoUri.authority.length !== 0 && pathUri.authority.length === 0) {
+					const match = driveLetterRegex.exec(pathUri.path);
+					if (match != null) {
+						const [, letter] = match;
+
+						try {
+							const networkPath = await new Promise<string | undefined>(resolve =>
+								fs.realpath.native(`${letter}:\\`, { encoding: 'utf8' }, (err, resolvedPath) =>
+									resolve(err != null ? undefined : resolvedPath),
+								),
+							);
+							if (networkPath != null) {
+								repoPath = Strings.normalizePath(
+									repoUri.fsPath.replace(
+										networkPath,
+										`${letter.toLowerCase()}:${networkPath.endsWith('\\') ? '\\' : ''}`,
+									),
+								);
+								return repoPath;
+							}
+						} catch {}
+					}
+
+					repoPath = Strings.normalizePath(pathUri.fsPath);
+				}
+
+				return repoPath;
+			}
 
 			// If we are not on Windows (symlinks don't seem to have the same issue on Windows), check if we are a symlink and if so, use the symlink path (not its resolved path)
 			// This is because VS Code will provide document Uris using the symlinked path
-			return await new Promise<string>(resolve => {
+			repoPath = await new Promise<string | undefined>(resolve => {
 				fs.realpath(path, { encoding: 'utf8' }, (err, resolvedPath) => {
 					if (err != null) {
 						Logger.debug(cc, `fs.realpath failed; repoPath=${repoPath}`);
@@ -2509,14 +3341,46 @@ export class GitService implements Disposable {
 					repoPath = repoPath!.replace(linkPath, path);
 					Logger.debug(
 						cc,
-						`Symlink detected; repoPath=${repoPath}, path=${path}, resolvedPath=${resolvedPath}`
+						`Symlink detected; repoPath=${repoPath}, path=${path}, resolvedPath=${resolvedPath}`,
 					);
 					resolve(repoPath);
 				});
 			});
+
+			return repoPath;
 		} catch (ex) {
 			Logger.error(ex, cc);
-			return undefined;
+			repoPath = undefined;
+			return repoPath;
+		} finally {
+			if (repoPath) {
+				void this.ensureProperWorkspaceCasing(repoPath, filePath);
+			}
+		}
+	}
+
+	@gate(() => '')
+	private async ensureProperWorkspaceCasing(repoPath: string, filePath: string) {
+		if (Container.config.advanced.messages.suppressImproperWorkspaceCasingWarning) return;
+
+		filePath = filePath.replace(/\\/g, '/');
+
+		let regexPath;
+		let testPath;
+		if (filePath > repoPath) {
+			regexPath = filePath;
+			testPath = repoPath;
+		} else {
+			testPath = filePath;
+			regexPath = repoPath;
+		}
+
+		let pathRegex = new RegExp(`^${regexPath}`);
+		if (!pathRegex.test(testPath)) {
+			pathRegex = new RegExp(pathRegex, 'i');
+			if (pathRegex.test(testPath)) {
+				await Messages.showIncorrectWorkspaceCasingWarningMessage();
+			}
 		}
 	}
 
@@ -2533,7 +3397,7 @@ export class GitService implements Disposable {
 		const repositoryTree = await this.getRepositoryTree();
 
 		const values = repositoryTree.values();
-		return predicate !== undefined ? Iterables.filter(values, predicate) : values;
+		return predicate != null ? Iterables.filter(values, predicate) : values;
 	}
 
 	@log()
@@ -2544,8 +3408,8 @@ export class GitService implements Disposable {
 		return Repository.sort(repositories.filter(r => !r.closed));
 	}
 
-	private async getRepositoryTree(): Promise<TernarySearchTree<Repository>> {
-		if (this._repositoriesLoadingPromise !== undefined) {
+	private async getRepositoryTree(): Promise<TernarySearchTree<string, Repository>> {
+		if (this._repositoriesLoadingPromise != null) {
 			await this._repositoriesLoadingPromise;
 			this._repositoriesLoadingPromise = undefined;
 		}
@@ -2555,22 +3419,22 @@ export class GitService implements Disposable {
 
 	async getRepository(
 		repoPath: string,
-		options?: { ref?: string; skipCacheUpdate?: boolean }
+		options?: { ref?: string; skipCacheUpdate?: boolean },
 	): Promise<Repository | undefined>;
 	async getRepository(
 		uri: Uri,
-		options?: { ref?: string; skipCacheUpdate?: boolean }
+		options?: { ref?: string; skipCacheUpdate?: boolean },
 	): Promise<Repository | undefined>;
 	async getRepository(
 		repoPathOrUri: string | Uri,
-		options?: { ref?: string; skipCacheUpdate?: boolean }
+		options?: { ref?: string; skipCacheUpdate?: boolean },
 	): Promise<Repository | undefined>;
 	@log<GitService['getRepository']>({
-		exit: repo => `returned ${repo !== undefined ? `${repo.path}` : 'undefined'}`
+		exit: repo => `returned ${repo != null ? `${repo.path}` : 'undefined'}`,
 	})
 	async getRepository(
 		repoPathOrUri: string | Uri,
-		options: { ref?: string; skipCacheUpdate?: boolean } = {}
+		options: { ref?: string; skipCacheUpdate?: boolean } = {},
 	): Promise<Repository | undefined> {
 		const repositoryTree = await this.getRepositoryTree();
 
@@ -2579,7 +3443,7 @@ export class GitService implements Disposable {
 		let path: string;
 		if (typeof repoPathOrUri === 'string') {
 			const repo = repositoryTree.get(repoPathOrUri);
-			if (repo !== undefined) return repo;
+			if (repo != null) return repo;
 
 			path = repoPathOrUri;
 			isVslsScheme = undefined;
@@ -2587,7 +3451,7 @@ export class GitService implements Disposable {
 			if (GitUri.is(repoPathOrUri)) {
 				if (repoPathOrUri.repoPath) {
 					const repo = repositoryTree.get(repoPathOrUri.repoPath);
-					if (repo !== undefined) return repo;
+					if (repo != null) return repo;
 				}
 
 				path = repoPathOrUri.fsPath;
@@ -2599,21 +3463,26 @@ export class GitService implements Disposable {
 		}
 
 		const repo = this.findRepositoryForPath(repositoryTree, path, isVslsScheme);
-		if (repo === undefined) return undefined;
+		if (repo == null) return undefined;
 
 		// Make sure the file is tracked in this repo before returning -- it could be from a submodule
 		if (!(await this.isTracked(path, repo.path, options))) return undefined;
 		return repo;
 	}
 
+	@debug({
+		args: {
+			0: (repositoryTree: TernarySearchTree<string, Repository>) => `count=${repositoryTree.count()}`,
+		},
+	})
 	private findRepositoryForPath(
-		repositoryTree: TernarySearchTree<Repository>,
+		repositoryTree: TernarySearchTree<string, Repository>,
 		path: string,
-		isVslsScheme: boolean | undefined
+		isVslsScheme: boolean | undefined,
 	): Repository | undefined {
 		let repo = repositoryTree.findSubstr(path);
 		// If we can't find the repo and we are a guest, check if we are a "root" workspace
-		if (repo === undefined && isVslsScheme !== false && Container.vsls.isMaybeGuest) {
+		if (repo == null && isVslsScheme !== false && Container.vsls.isMaybeGuest) {
 			if (!vslsUriPrefixRegex.test(path)) {
 				path = Strings.normalizePath(path);
 				const vslsPath = `/~0${path.startsWith(slash) ? path : `/${path}`}`;
@@ -2623,20 +3492,43 @@ export class GitService implements Disposable {
 		return repo;
 	}
 
+	async getLocalInfoFromRemoteUri(
+		uri: Uri,
+		options?: { validate?: boolean },
+	): Promise<{ uri: Uri; startLine?: number; endLine?: number } | undefined> {
+		for (const repo of await this.getRepositories()) {
+			for (const remote of await repo.getRemotes()) {
+				const local = await remote?.provider?.getLocalInfoFromRemoteUri(repo, uri, options);
+				if (local != null) return local;
+			}
+		}
+
+		return undefined;
+	}
+
 	async getRepositoryCount(): Promise<number> {
 		const repositoryTree = await this.getRepositoryTree();
 		return repositoryTree.count();
 	}
 
 	@log()
-	async getStashList(repoPath: string | undefined): Promise<GitStash | undefined> {
-		if (repoPath === undefined) return undefined;
+	async getStash(repoPath: string | undefined): Promise<GitStash | undefined> {
+		if (repoPath == null) return undefined;
 
-		const data = await Git.stash__list(repoPath, {
-			similarityThreshold: Container.config.advanced.similarityThreshold
-		});
-		const stash = GitStashParser.parse(data, repoPath);
-		return stash;
+		let stash = this.useCaching ? this._stashesCache.get(repoPath) : undefined;
+		if (stash === undefined) {
+			const data = await Git.stash__list(repoPath, {
+				similarityThreshold: Container.config.advanced.similarityThreshold,
+			});
+			stash = GitStashParser.parse(data, repoPath);
+
+			const repo = await this.getRepository(repoPath);
+			if (repo?.supportsChangeEvents) {
+				this._stashesCache.set(repoPath, stash ?? null);
+			}
+		}
+
+		return stash ?? undefined;
 	}
 
 	@log()
@@ -2644,79 +3536,91 @@ export class GitService implements Disposable {
 		const porcelainVersion = Git.validateVersion(2, 11) ? 2 : 1;
 
 		const data = await Git.status__file(repoPath, fileName, porcelainVersion, {
-			similarityThreshold: Container.config.advanced.similarityThreshold
+			similarityThreshold: Container.config.advanced.similarityThreshold,
 		});
 		const status = GitStatusParser.parse(data, repoPath, porcelainVersion);
-		if (status === undefined || !status.files.length) return undefined;
+		if (status == null || !status.files.length) return undefined;
 
 		return status.files[0];
 	}
 
 	@log()
 	async getStatusForRepo(repoPath: string | undefined): Promise<GitStatus | undefined> {
-		if (repoPath === undefined) return undefined;
+		if (repoPath == null) return undefined;
 
 		const porcelainVersion = Git.validateVersion(2, 11) ? 2 : 1;
 
 		const data = await Git.status(repoPath, porcelainVersion, {
-			similarityThreshold: Container.config.advanced.similarityThreshold
+			similarityThreshold: Container.config.advanced.similarityThreshold,
 		});
 		const status = GitStatusParser.parse(data, repoPath, porcelainVersion);
+
+		if (status?.detached) {
+			const rebaseStatus = await this.getRebaseStatus(repoPath);
+			if (rebaseStatus != null) {
+				return new GitStatus(
+					repoPath,
+					rebaseStatus.incoming.name,
+					status.sha,
+					status.files,
+					status.state,
+					status.upstream,
+					true,
+				);
+			}
+		}
 		return status;
 	}
 
-	@log()
+	@log({
+		args: {
+			1: () => false,
+		},
+	})
 	async getTags(
 		repoPath: string | undefined,
-		options: { filter?: (t: GitTag) => boolean; sort?: boolean } = {}
+		options: { filter?: (t: GitTag) => boolean; sort?: boolean | { orderBy?: TagSorting } } = {},
 	): Promise<GitTag[]> {
-		if (repoPath === undefined) return [];
+		if (repoPath == null) return [];
 
-		let tags: GitTag[] | undefined;
-		try {
-			tags = this._tagsCache.get(repoPath);
-			if (tags !== undefined) return tags;
-
+		let tags = this.useCaching ? this._tagsCache.get(repoPath) : undefined;
+		if (tags == null) {
 			const data = await Git.tag(repoPath);
-			tags = GitTagParser.parse(data, repoPath) || [];
+			tags = GitTagParser.parse(data, repoPath) ?? [];
 
 			const repo = await this.getRepository(repoPath);
-			if (repo !== undefined && repo.supportsChangeEvents) {
+			if (repo?.supportsChangeEvents) {
 				this._tagsCache.set(repoPath, tags);
 			}
-
-			return tags;
-		} finally {
-			if (options.filter !== undefined) {
-				tags = tags!.filter(options.filter);
-			}
-
-			if (options.sort) {
-				GitTag.sort(tags!);
-			}
-
-			if (options.filter !== undefined) {
-				// eslint-disable-next-line no-unsafe-finally
-				return tags!;
-			}
 		}
+
+		if (options.filter != null) {
+			tags = tags.filter(options.filter);
+		}
+
+		// eslint-disable-next-line @typescript-eslint/strict-boolean-expressions
+		if (options.sort) {
+			GitTag.sort(tags, typeof options.sort === 'boolean' ? undefined : options.sort);
+		}
+
+		return tags;
 	}
 
 	@log()
 	async getTreeFileForRevision(repoPath: string, fileName: string, ref: string): Promise<GitTree | undefined> {
-		if (repoPath === undefined || fileName == null || fileName.length === 0) return undefined;
+		if (repoPath == null || fileName == null || fileName.length === 0) return undefined;
 
 		const data = await Git.ls_tree(repoPath, ref, { fileName: fileName });
 		const trees = GitTreeParser.parse(data);
-		return trees === undefined || trees.length === 0 ? undefined : trees[0];
+		return trees?.length ? trees[0] : undefined;
 	}
 
 	@log()
 	async getTreeForRevision(repoPath: string, ref: string): Promise<GitTree[]> {
-		if (repoPath === undefined) return [];
+		if (repoPath == null) return [];
 
 		const data = await Git.ls_tree(repoPath, ref);
-		return GitTreeParser.parse(data) || [];
+		return GitTreeParser.parse(data) ?? [];
 	}
 
 	@log()
@@ -2728,23 +3632,27 @@ export class GitService implements Disposable {
 	async getVersionedUri(
 		repoPath: string | undefined,
 		fileName: string,
-		ref: string | undefined
+		ref: string | undefined,
 	): Promise<Uri | undefined> {
-		if (ref === GitService.deletedOrMissingSha) return undefined;
+		if (ref === GitRevision.deletedOrMissing) return undefined;
 
-		if (ref == null || ref.length === 0 || (Git.isUncommitted(ref) && !Git.isUncommittedStaged(ref))) {
+		if (
+			ref == null ||
+			ref.length === 0 ||
+			(GitRevision.isUncommitted(ref) && !GitRevision.isUncommittedStaged(ref))
+		) {
 			// Make sure the file exists in the repo
 			let data = await Git.ls_files(repoPath!, fileName);
-			if (data !== undefined) return GitUri.file(fileName);
+			if (data != null) return GitUri.file(fileName);
 
 			// Check if the file exists untracked
 			data = await Git.ls_files(repoPath!, fileName, { untracked: true });
-			if (data !== undefined) return GitUri.file(fileName);
+			if (data != null) return GitUri.file(fileName);
 
 			return undefined;
 		}
 
-		if (Git.isUncommittedStaged(ref)) {
+		if (GitRevision.isUncommittedStaged(ref)) {
 			return GitUri.git(fileName, repoPath);
 		}
 
@@ -2759,34 +3667,94 @@ export class GitService implements Disposable {
 		let ref;
 		do {
 			data = await Git.ls_files(repoPath, fileName);
-			if (data !== undefined) {
-				return GitUri.resolveToUri(Strings.splitSingle(data, '\n')[0], repoPath);
+			if (data != null) {
+				fileName = Strings.splitSingle(data, '\n')[0];
+				break;
 			}
 
 			// TODO: Add caching
 			// Get the most recent commit for this file name
 			ref = await Git.log__file_recent(repoPath, fileName, {
-				similarityThreshold: Container.config.advanced.similarityThreshold
+				similarityThreshold: Container.config.advanced.similarityThreshold,
 			});
-			if (ref === undefined) return undefined;
+			if (ref == null) return undefined;
 
 			// Now check if that commit had any renames
 			data = await Git.log__file(repoPath, '.', ref, {
-				filters: ['R'],
+				filters: ['R', 'C', 'D'],
 				limit: 1,
-				simple: true
+				format: 'simple',
 			});
-			if (data == null || data.length === 0) {
-				return GitUri.resolveToUri(fileName, repoPath);
-			}
+			if (data == null || data.length === 0) break;
 
-			const [renamedRef, renamedFile] = GitLogParser.parseSimpleRenamed(data, fileName);
-			if (renamedRef === undefined || renamedFile === undefined) {
-				return GitUri.resolveToUri(fileName, repoPath);
-			}
+			const [foundRef, foundFile, foundStatus] = GitLogParser.parseSimpleRenamed(data, fileName);
+			if (foundStatus === 'D' && foundFile != null) return undefined;
+			if (foundRef == null || foundFile == null) break;
 
-			fileName = renamedFile;
+			fileName = foundFile;
 		} while (true);
+
+		uri = GitUri.resolveToUri(fileName, repoPath);
+		return (await fsExists(uri.fsPath)) ? uri : undefined;
+	}
+
+	@log()
+	async hasBranchesAndOrTags(
+		repoPath: string | undefined,
+		{
+			filter,
+		}: {
+			filter?: { branches?: (b: GitBranch) => boolean; tags?: (t: GitTag) => boolean };
+		} = {},
+	) {
+		const [branches, tags] = await Promise.all<GitBranch[] | undefined, GitTag[] | undefined>([
+			this.getBranches(repoPath, {
+				filter: filter?.branches,
+				sort: false,
+			}),
+			this.getTags(repoPath, {
+				filter: filter?.tags,
+				sort: false,
+			}),
+		]);
+
+		return (branches != null && branches.length !== 0) || (tags != null && tags.length !== 0);
+	}
+
+	@log()
+	async hasRemotes(repoPath: string | undefined): Promise<boolean> {
+		if (repoPath == null) return false;
+
+		const repository = await this.getRepository(repoPath);
+		if (repository == null) return false;
+
+		return repository.hasRemotes();
+	}
+
+	@log()
+	async hasTrackingBranch(repoPath: string | undefined): Promise<boolean> {
+		if (repoPath == null) return false;
+
+		const repository = await this.getRepository(repoPath);
+		if (repository == null) return false;
+
+		return repository.hasTrackingBranch();
+	}
+
+	@log({
+		args: {
+			1: (editor: TextEditor) =>
+				editor != null ? `TextEditor(${Logger.toLoggable(editor.document.uri)})` : 'undefined',
+		},
+	})
+	async isActiveRepoPath(repoPath: string | undefined, editor?: TextEditor): Promise<boolean> {
+		if (repoPath == null) return false;
+
+		editor = editor ?? window.activeTextEditor;
+		if (editor == null) return false;
+
+		const doc = await Container.tracker.getOrAdd(editor.document.uri);
+		return repoPath === doc?.uri.repoPath;
 	}
 
 	isTrackable(scheme: string): boolean;
@@ -2805,19 +3773,19 @@ export class GitService implements Disposable {
 	async isTracked(
 		fileName: string,
 		repoPath?: string,
-		options?: { ref?: string; skipCacheUpdate?: boolean }
+		options?: { ref?: string; skipCacheUpdate?: boolean },
 	): Promise<boolean>;
 	async isTracked(uri: GitUri): Promise<boolean>;
 	@log<GitService['isTracked']>({
 		exit: tracked => `returned ${tracked}`,
-		singleLine: true
+		singleLine: true,
 	})
 	async isTracked(
 		fileNameOrUri: string | GitUri,
 		repoPath?: string,
-		options: { ref?: string; skipCacheUpdate?: boolean } = {}
+		options: { ref?: string; skipCacheUpdate?: boolean } = {},
 	): Promise<boolean> {
-		if (options.ref === GitService.deletedOrMissingSha) return false;
+		if (options.ref === GitRevision.deletedOrMissing) return false;
 
 		let ref = options.ref;
 		let cacheKey: string;
@@ -2834,18 +3802,18 @@ export class GitService implements Disposable {
 			cacheKey = GitUri.toKey(fileName);
 		}
 
-		if (ref !== undefined) {
+		if (ref != null) {
 			cacheKey += `:${ref}`;
 		}
 
 		let tracked = this._trackedCache.get(cacheKey);
-		if (tracked !== undefined) {
+		if (tracked != null) {
 			tracked = await tracked;
 
 			return tracked;
 		}
 
-		tracked = this.isTrackedCore(fileName, repoPath === undefined ? emptyStr : repoPath, ref);
+		tracked = this.isTrackedCore(fileName, repoPath == null ? emptyStr : repoPath, ref);
 		if (options.skipCacheUpdate) {
 			tracked = await tracked;
 
@@ -2860,21 +3828,19 @@ export class GitService implements Disposable {
 	}
 
 	private async isTrackedCore(fileName: string, repoPath: string, ref?: string) {
-		if (ref === GitService.deletedOrMissingSha) return false;
+		if (ref === GitRevision.deletedOrMissing) return false;
 
 		try {
 			// Even if we have a ref, check first to see if the file exists (that way the cache will be better reused)
-			let tracked = Boolean(await Git.ls_files(repoPath === undefined ? emptyStr : repoPath, fileName));
-			if (!tracked && ref !== undefined) {
-				tracked = Boolean(
-					await Git.ls_files(repoPath === undefined ? emptyStr : repoPath, fileName, { ref: ref })
-				);
+			let tracked = Boolean(await Git.ls_files(repoPath == null ? emptyStr : repoPath, fileName));
+			if (!tracked && ref != null) {
+				tracked = Boolean(await Git.ls_files(repoPath == null ? emptyStr : repoPath, fileName, { ref: ref }));
 				// If we still haven't found this file, make sure it wasn't deleted in that ref (i.e. check the previous)
 				if (!tracked) {
 					tracked = Boolean(
-						await Git.ls_files(repoPath === undefined ? emptyStr : repoPath, fileName, {
-							ref: `${ref}^`
-						})
+						await Git.ls_files(repoPath == null ? emptyStr : repoPath, fileName, {
+							ref: `${ref}^`,
+						}),
 					);
 				}
 			}
@@ -2888,7 +3854,7 @@ export class GitService implements Disposable {
 	@log()
 	async getDiffTool(repoPath?: string) {
 		return (
-			(await Git.config__get('diff.guitool', repoPath, { local: true })) ||
+			(await Git.config__get('diff.guitool', repoPath, { local: true })) ??
 			Git.config__get('diff.tool', repoPath, { local: true })
 		);
 	}
@@ -2897,67 +3863,128 @@ export class GitService implements Disposable {
 	async openDiffTool(
 		repoPath: string,
 		uri: Uri,
-		options: { ref1?: string; ref2?: string; staged?: boolean; tool?: string } = {}
+		options: { ref1?: string; ref2?: string; staged?: boolean; tool?: string } = {},
+	): Promise<void> {
+		try {
+			if (!options.tool) {
+				const cc = Logger.getCorrelationContext();
+
+				options.tool = Container.config.advanced.externalDiffTool || (await this.getDiffTool(repoPath));
+				if (options.tool == null) throw new Error('No diff tool found');
+
+				Logger.log(cc, `Using tool=${options.tool}`);
+			}
+
+			const { tool, ...opts } = options;
+			await Git.difftool(repoPath, uri.fsPath, tool, opts);
+		} catch (ex) {
+			const msg: string = ex?.toString() ?? '';
+			if (msg === 'No diff tool found' || /Unknown .+? tool/.test(msg)) {
+				const viewDocs = 'View Git Docs';
+				const result = await window.showWarningMessage(
+					'Unable to open changes because the specified diff tool cannot be found or no Git diff tool is configured',
+					viewDocs,
+				);
+				if (result === viewDocs) {
+					void env.openExternal(
+						Uri.parse('https://git-scm.com/docs/git-config#Documentation/git-config.txt-difftool'),
+					);
+				}
+
+				return;
+			}
+
+			Logger.error(ex, 'openDiffTool');
+			void Messages.showGenericErrorMessage('Unable to open compare');
+		}
+	}
+
+	@log()
+	async openDirectoryCompare(repoPath: string, ref1: string, ref2?: string, tool?: string): Promise<void> {
+		try {
+			if (!tool) {
+				const cc = Logger.getCorrelationContext();
+
+				tool = Container.config.advanced.externalDirectoryDiffTool || (await this.getDiffTool(repoPath));
+				if (tool == null) throw new Error('No diff tool found');
+
+				Logger.log(cc, `Using tool=${tool}`);
+			}
+
+			await Git.difftool__dir_diff(repoPath, tool, ref1, ref2);
+		} catch (ex) {
+			const msg: string = ex?.toString() ?? '';
+			if (msg === 'No diff tool found' || /Unknown .+? tool/.test(msg)) {
+				const viewDocs = 'View Git Docs';
+				const result = await window.showWarningMessage(
+					'Unable to open directory compare because the specified diff tool cannot be found or no Git diff tool is configured',
+					viewDocs,
+				);
+				if (result === viewDocs) {
+					void env.openExternal(
+						Uri.parse('https://git-scm.com/docs/git-config#Documentation/git-config.txt-difftool'),
+					);
+				}
+
+				return;
+			}
+
+			Logger.error(ex, 'openDirectoryCompare');
+			void Messages.showGenericErrorMessage('Unable to open directory compare');
+		}
+	}
+
+	async resolveReference(
+		repoPath: string,
+		ref: string,
+		fileName?: string,
+		options?: { timeout?: number },
+	): Promise<string>;
+	async resolveReference(repoPath: string, ref: string, uri?: Uri, options?: { timeout?: number }): Promise<string>;
+	@log()
+	async resolveReference(
+		repoPath: string,
+		ref: string,
+		fileNameOrUri?: string | Uri,
+		options?: { timeout?: number },
 	) {
-		if (!options.tool) {
-			const cc = Logger.getCorrelationContext();
-
-			options.tool = await this.getDiffTool(repoPath);
-			if (options.tool === undefined) throw new Error('No diff tool found');
-
-			Logger.log(cc, `Using tool=${options.tool}`);
+		if (ref == null || ref.length === 0 || ref === GitRevision.deletedOrMissing || GitRevision.isUncommitted(ref)) {
+			return ref;
 		}
 
-		const { tool, ...opts } = options;
-		return Git.difftool(repoPath, uri.fsPath, tool, opts);
+		if (fileNameOrUri == null) {
+			if (GitRevision.isSha(ref) || !GitRevision.isShaLike(ref) || ref.endsWith('^3')) return ref;
+
+			return (await Git.rev_parse__verify(repoPath, ref)) ?? ref;
+		}
+
+		const fileName =
+			typeof fileNameOrUri === 'string'
+				? fileNameOrUri
+				: Strings.normalizePath(paths.relative(repoPath, fileNameOrUri.fsPath));
+
+		const blob = await Git.rev_parse__verify(repoPath, ref, fileName);
+		if (blob == null) return GitRevision.deletedOrMissing;
+
+		let promise: Promise<string | void | undefined> = Git.log__find_object(repoPath, blob, ref, fileName);
+		if (options?.timeout != null) {
+			promise = Promise.race([promise, Functions.wait(options.timeout)]);
+		}
+
+		return (await promise) ?? ref;
 	}
 
 	@log()
-	async openDirectoryDiff(repoPath: string, ref1: string, ref2?: string, tool?: string) {
-		if (!tool) {
-			const cc = Logger.getCorrelationContext();
-
-			tool = await this.getDiffTool(repoPath);
-			if (tool === undefined) throw new Error('No diff tool found');
-
-			Logger.log(cc, `Using tool=${tool}`);
-		}
-
-		return Git.difftool__dir_diff(repoPath, tool, ref1, ref2);
-	}
-
-	@log()
-	async resolveReference(repoPath: string, ref: string, uri?: Uri) {
-		if (ref == null || ref.length === 0 || ref === GitService.deletedOrMissingSha) return ref;
-
-		if (uri == null) {
-			if (Git.isSha(ref) || !Git.isShaLike(ref) || ref.endsWith('^3')) return ref;
-
-			return (await Git.rev_parse(repoPath, ref)) || ref;
-		}
-
-		const fileName = Strings.normalizePath(paths.relative(repoPath, uri.fsPath));
-
-		const match = Git.shaParentRegex.exec(ref);
-		if (match != null) {
-			const parentRef = await Git.log__file_recent(repoPath, fileName, { ref: ref });
-			if (parentRef !== undefined) return parentRef;
-		}
-
-		const ensuredRef = await Git.cat_file__resolve(repoPath, fileName, ref);
-		if (ensuredRef === undefined) return ref;
-
-		return ensuredRef;
-	}
-
-	@log()
-	validateBranchOrTagName(ref: string, repoPath?: string) {
+	validateBranchOrTagName(ref: string, repoPath?: string): Promise<boolean> {
 		return Git.check_ref_format(ref, repoPath);
 	}
 
 	@log()
-	validateReference(repoPath: string, ref: string) {
-		return Git.cat_file__validate(repoPath, ref);
+	async validateReference(repoPath: string, ref: string) {
+		if (ref == null || ref.length === 0) return false;
+		if (ref === GitRevision.deletedOrMissing || GitRevision.isUncommitted(ref)) return true;
+
+		return (await Git.rev_parse__verify(repoPath, ref)) != null;
 	}
 
 	stageFile(repoPath: string, fileName: string): Promise<string>;
@@ -2966,7 +3993,7 @@ export class GitService implements Disposable {
 	stageFile(repoPath: string, fileNameOrUri: string | Uri): Promise<string> {
 		return Git.add(
 			repoPath,
-			typeof fileNameOrUri === 'string' ? fileNameOrUri : Git.splitPath(fileNameOrUri.fsPath, repoPath)[0]
+			typeof fileNameOrUri === 'string' ? fileNameOrUri : Git.splitPath(fileNameOrUri.fsPath, repoPath)[0],
 		);
 	}
 
@@ -2976,7 +4003,7 @@ export class GitService implements Disposable {
 	stageDirectory(repoPath: string, directoryOrUri: string | Uri): Promise<string> {
 		return Git.add(
 			repoPath,
-			typeof directoryOrUri === 'string' ? directoryOrUri : Git.splitPath(directoryOrUri.fsPath, repoPath)[0]
+			typeof directoryOrUri === 'string' ? directoryOrUri : Git.splitPath(directoryOrUri.fsPath, repoPath)[0],
 		);
 	}
 
@@ -2986,7 +4013,7 @@ export class GitService implements Disposable {
 	unStageFile(repoPath: string, fileNameOrUri: string | Uri): Promise<string> {
 		return Git.reset(
 			repoPath,
-			typeof fileNameOrUri === 'string' ? fileNameOrUri : Git.splitPath(fileNameOrUri.fsPath, repoPath)[0]
+			typeof fileNameOrUri === 'string' ? fileNameOrUri : Git.splitPath(fileNameOrUri.fsPath, repoPath)[0],
 		);
 	}
 
@@ -2996,7 +4023,7 @@ export class GitService implements Disposable {
 	unStageDirectory(repoPath: string, directoryOrUri: string | Uri): Promise<string> {
 		return Git.reset(
 			repoPath,
-			typeof directoryOrUri === 'string' ? directoryOrUri : Git.splitPath(directoryOrUri.fsPath, repoPath)[0]
+			typeof directoryOrUri === 'string' ? directoryOrUri : Git.splitPath(directoryOrUri.fsPath, repoPath)[0],
 		);
 	}
 
@@ -3006,8 +4033,8 @@ export class GitService implements Disposable {
 	}
 
 	@log()
-	stashDelete(repoPath: string, stashName: string) {
-		return Git.stash__delete(repoPath, stashName);
+	stashDelete(repoPath: string, stashName: string, ref?: string) {
+		return Git.stash__delete(repoPath, stashName, ref);
 	}
 
 	@log()
@@ -3015,25 +4042,43 @@ export class GitService implements Disposable {
 		repoPath: string,
 		message?: string,
 		uris?: Uri[],
-		options: { includeUntracked?: boolean; keepIndex?: boolean } = {}
+		options: { includeUntracked?: boolean; keepIndex?: boolean } = {},
 	) {
-		if (uris === undefined) return Git.stash__push(repoPath, message, options);
+		if (uris == null) return Git.stash__push(repoPath, message, options);
 
-		GitService.ensureGitVersion('2.13.2', 'Stashing individual files');
+		GitService.ensureGitVersion(
+			'2.13.2',
+			'Stashing individual files',
+			' Please retry by stashing everything or install a more recent version of Git.',
+		);
 
 		const pathspecs = uris.map(u => `./${Git.splitPath(u.fsPath, repoPath)[0]}`);
-		return Git.stash__push(repoPath, message, { ...options, pathspecs: pathspecs });
+
+		const stdinVersion = '2.30.0';
+		const stdin = GitService.compareGitVersion(stdinVersion) !== -1;
+		// If we don't support stdin, then error out if we are over the maximum allowed git cli length
+		if (!stdin && Arrays.countStringLength(pathspecs) > maxGitCliLength) {
+			GitService.ensureGitVersion(
+				stdinVersion,
+				`Stashing so many files (${pathspecs.length}) at once`,
+				' Please retry by stashing fewer files or install a more recent version of Git.',
+			);
+		}
+
+		return Git.stash__push(repoPath, message, {
+			...options,
+			pathspecs: pathspecs,
+			stdin: stdin,
+		});
 	}
 
 	static compareGitVersion(version: string) {
-		return Versions.compare(Versions.fromString(this.getGitVersion()), Versions.fromString(version));
+		return Versions.compare(Versions.fromString(Git.getGitVersion()), Versions.fromString(version));
 	}
-
-	static ensureGitVersion(version: string, feature: string): void {
-		const gitVersion = this.getGitVersion();
-		if (Versions.compare(Versions.fromString(gitVersion), Versions.fromString(version)) === -1) {
+	static ensureGitVersion(version: string, prefix: string, suffix: string): void {
+		if (GitService.compareGitVersion(version) === -1) {
 			throw new Error(
-				`${feature} requires a newer version of Git (>= ${version}) than is currently installed (${gitVersion}). Please install a more recent version of Git to use this GitLens feature.`
+				`${prefix} requires a newer version of Git (>= ${version}) than is currently installed (${Git.getGitVersion()}).${suffix}`,
 			);
 		}
 	}
@@ -3042,7 +4087,7 @@ export class GitService implements Disposable {
 	static async getBuiltInGitApi(): Promise<BuiltInGitApi | undefined> {
 		try {
 			const extension = extensions.getExtension('vscode.git') as Extension<GitExtension>;
-			if (extension !== undefined) {
+			if (extension != null) {
 				const gitExtension = extension.isActive ? extension.exports : await extension.activate();
 
 				return gitExtension.getAPI(1);
@@ -3052,113 +4097,26 @@ export class GitService implements Disposable {
 		return undefined;
 	}
 
+	@log()
+	static async getOrOpenBuiltInGitRepository(repoPath: string): Promise<BuiltInGitRepository | undefined> {
+		const gitApi = await GitService.getBuiltInGitApi();
+		if (gitApi?.openRepository != null) {
+			return (await gitApi?.openRepository?.(Uri.file(repoPath))) ?? undefined;
+		}
+
+		return gitApi?.getRepository(Uri.file(repoPath)) ?? undefined;
+	}
+
+	@log()
+	static async openBuiltInGitRepository(repoPath: string): Promise<BuiltInGitRepository | undefined> {
+		const gitApi = await GitService.getBuiltInGitApi();
+		return (await gitApi?.openRepository?.(Uri.file(repoPath))) ?? undefined;
+	}
+
 	static getEncoding(repoPath: string, fileName: string): string;
 	static getEncoding(uri: Uri): string;
 	static getEncoding(repoPathOrUri: string | Uri, fileName?: string): string {
 		const uri = typeof repoPathOrUri === 'string' ? GitUri.resolveToUri(fileName!, repoPathOrUri) : repoPathOrUri;
 		return Git.getEncoding(configuration.getAny<string>('files.encoding', uri));
-	}
-
-	static deletedOrMissingSha = Git.deletedOrMissingSha;
-	static getGitPath = Git.getGitPath;
-	static getGitVersion = Git.getGitVersion;
-	static isSha = Git.isSha;
-	static isShaLike = Git.isShaLike;
-	static isShaParent = Git.isShaParent;
-	static isUncommitted = Git.isUncommitted;
-	static isUncommittedStaged = Git.isUncommittedStaged;
-	static uncommittedSha = Git.uncommittedSha;
-	static uncommittedStagedSha = Git.uncommittedStagedSha;
-
-	static shortenSha(
-		ref: string | undefined,
-		options: {
-			force?: boolean;
-			strings?: { uncommitted?: string; uncommittedStaged?: string; working?: string };
-		} = {}
-	) {
-		if (ref === GitService.deletedOrMissingSha) return '(deleted)';
-
-		return Git.shortenSha(ref, options);
-	}
-
-	static parseSearchOperations(search: string): Map<string, string[]> {
-		const operations = new Map<string, string[]>();
-
-		let op;
-		let value;
-
-		let match = searchMessageOperationRegex.exec(search);
-		if (match != null && match[1] !== '') {
-			[, value] = match;
-
-			if (GitService.isSha(value)) {
-				let values = operations.get('commit:');
-				if (values === undefined) {
-					values = [value];
-					operations.set('commit:', values);
-				} else {
-					values.push(value);
-				}
-			} else {
-				this.parseSearchMessageOperations(value, operations);
-			}
-		}
-
-		do {
-			match = searchOperationRegex.exec(search);
-			if (match == null) break;
-
-			[, op, value] = match;
-
-			if (op !== undefined) {
-				op = normalizeSearchOperatorsMap.get(op as SearchOperators)!;
-
-				if (op === 'message:') {
-					this.parseSearchMessageOperations(value, operations);
-				} else {
-					let values = operations.get(op);
-					if (values === undefined) {
-						values = [value];
-						operations.set(op, values);
-					} else {
-						values.push(value);
-					}
-				}
-			}
-		} while (true);
-
-		return operations;
-	}
-
-	private static parseSearchMessageOperations(message: string, operations: Map<string, string[]>) {
-		let values = operations.get('message:');
-
-		if (message === emptyStr) {
-			if (values === undefined) {
-				values = [''];
-				operations.set('message:', values);
-			} else {
-				values.push('');
-			}
-
-			return;
-		}
-
-		let match;
-		let value;
-		do {
-			match = searchMessageValuesRegex.exec(message);
-			if (match == null) break;
-
-			[, value] = match;
-
-			if (values === undefined) {
-				values = [value];
-				operations.set('message:', values);
-			} else {
-				values.push(value);
-			}
-		} while (true);
 	}
 }

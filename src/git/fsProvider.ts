@@ -10,11 +10,12 @@ import {
 	FileSystemProvider,
 	FileType,
 	Uri,
-	workspace
+	workspace,
 } from 'vscode';
 import { DocumentSchemes } from '../constants';
 import { Container } from '../container';
-import { GitService, GitTree, GitUri } from '../git/gitService';
+import { GitRevision, GitTree } from '../git/git';
+import { GitUri } from '../git/gitUri';
 import { debug, Iterables, Strings, TernarySearchTree } from '../system';
 
 const emptyArray = new Uint8Array(0);
@@ -30,19 +31,19 @@ export function toGitLensFSUri(ref: string, repoPath: string): Uri {
 
 export class GitFileSystemProvider implements FileSystemProvider, Disposable {
 	private readonly _disposable: Disposable;
-	private readonly _searchTreeMap = new Map<string, Promise<TernarySearchTree<GitTree>>>();
+	private readonly _searchTreeMap = new Map<string, Promise<TernarySearchTree<string, GitTree>>>();
 
 	constructor() {
 		this._disposable = Disposable.from(
 			workspace.registerFileSystemProvider(DocumentSchemes.GitLens, this, {
 				isCaseSensitive: true,
-				isReadonly: true
-			})
+				isReadonly: true,
+			}),
 		);
 	}
 
 	dispose() {
-		this._disposable && this._disposable.dispose();
+		this._disposable.dispose();
 	}
 
 	private _onDidChangeFile = new EventEmitter<FileChangeEvent[]>();
@@ -70,8 +71,8 @@ export class GitFileSystemProvider implements FileSystemProvider, Disposable {
 		const items = [
 			...Iterables.map<GitTree, [string, FileType]>(tree, t => [
 				path != null && path.length !== 0 ? Strings.normalizePath(paths.relative(path, t.path)) : t.path,
-				typeToFileType(t.type)
-			])
+				typeToFileType(t.type),
+			]),
 		];
 		return items;
 	}
@@ -80,7 +81,7 @@ export class GitFileSystemProvider implements FileSystemProvider, Disposable {
 	async readFile(uri: Uri): Promise<Uint8Array> {
 		const { path, ref, repoPath } = fromGitLensFSUri(uri);
 
-		if (ref === GitService.deletedOrMissingSha) return emptyArray;
+		if (ref === GitRevision.deletedOrMissing) return emptyArray;
 
 		const buffer = await Container.git.getVersionedFileBuffer(repoPath, path, ref);
 		if (buffer === undefined) return emptyArray;
@@ -96,12 +97,12 @@ export class GitFileSystemProvider implements FileSystemProvider, Disposable {
 	async stat(uri: Uri): Promise<FileStat> {
 		const { path, ref, repoPath } = fromGitLensFSUri(uri);
 
-		if (ref === GitService.deletedOrMissingSha) {
+		if (ref === GitRevision.deletedOrMissing) {
 			return {
 				type: FileType.File,
 				size: 0,
 				ctime: 0,
-				mtime: 0
+				mtime: 0,
 			};
 		}
 
@@ -120,7 +121,7 @@ export class GitFileSystemProvider implements FileSystemProvider, Disposable {
 					type: FileType.Directory,
 					size: 0,
 					ctime: 0,
-					mtime: 0
+					mtime: 0,
 				};
 			}
 
@@ -135,7 +136,7 @@ export class GitFileSystemProvider implements FileSystemProvider, Disposable {
 			type: typeToFileType(treeItem.type),
 			size: treeItem.size,
 			ctime: 0,
-			mtime: 0
+			mtime: 0,
 		};
 	}
 
@@ -143,7 +144,7 @@ export class GitFileSystemProvider implements FileSystemProvider, Disposable {
 		return {
 			dispose: () => {
 				// nothing to dispose
-			}
+			},
 		};
 	}
 

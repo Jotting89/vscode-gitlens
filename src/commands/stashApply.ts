@@ -1,22 +1,20 @@
 'use strict';
-import { commands } from 'vscode';
-import { Container } from '../container';
-import { GitStashCommit } from '../git/gitService';
-import { CommandQuickPickItem } from '../quickpicks';
+import { GitActions } from '../commands';
 import {
 	command,
 	Command,
 	CommandContext,
 	Commands,
-	isCommandViewContextWithCommit,
-	isCommandViewContextWithRepo
+	isCommandContextViewNodeHasCommit,
+	isCommandContextViewNodeHasRepository,
 } from './common';
-import { GitCommandsCommandArgs } from '../commands';
+import { GitStashCommit, GitStashReference } from '../git/git';
+import { CommandQuickPickItem } from '../quickpicks';
 
 export interface StashApplyCommandArgs {
 	deleteAfter?: boolean;
 	repoPath?: string;
-	stashItem?: { stashName: string; message: string; ref: string; repoPath: string };
+	stashItem?: GitStashReference & { message: string };
 
 	goBackCommand?: CommandQuickPickItem;
 }
@@ -28,9 +26,9 @@ export class StashApplyCommand extends Command {
 	}
 
 	protected preExecute(context: CommandContext, args?: StashApplyCommandArgs) {
-		if (isCommandViewContextWithCommit<GitStashCommit>(context)) {
+		if (isCommandContextViewNodeHasCommit<GitStashCommit>(context)) {
 			args = { ...args, stashItem: context.node.commit };
-		} else if (isCommandViewContextWithRepo(context)) {
+		} else if (isCommandContextViewNodeHasRepository(context)) {
 			args = { ...args, repoPath: context.node.repo.path };
 		}
 
@@ -38,21 +36,10 @@ export class StashApplyCommand extends Command {
 	}
 
 	async execute(args?: StashApplyCommandArgs) {
-		args = { deleteAfter: false, ...args };
-
-		let repo;
-		if (args.stashItem !== undefined || args.repoPath !== undefined) {
-			repo = await Container.git.getRepository((args.stashItem && args.stashItem.repoPath) || args.repoPath!);
+		if (args?.deleteAfter) {
+			return GitActions.Stash.pop(args?.repoPath ?? args?.stashItem?.repoPath, args?.stashItem);
 		}
 
-		const gitCommandArgs: GitCommandsCommandArgs = {
-			command: 'stash',
-			state: {
-				subcommand: args.deleteAfter ? 'pop' : 'apply',
-				repo: repo,
-				stash: args.stashItem
-			}
-		};
-		return commands.executeCommand(Commands.GitCommands, gitCommandArgs);
+		return GitActions.Stash.apply(args?.repoPath ?? args?.stashItem?.repoPath, args?.stashItem);
 	}
 }

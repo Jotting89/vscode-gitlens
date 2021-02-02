@@ -1,5 +1,6 @@
 'use strict';
-import { GitDiff, GitDiffHunk, GitDiffHunkLine, GitDiffLine, GitDiffShortStat, GitFile, GitFileStatus } from '../git';
+import { GitDiff, GitDiffHunk, GitDiffHunkLine, GitDiffLine, GitDiffShortStat } from '../models/diff';
+import { GitFile, GitFileStatus } from '../models/file';
 import { debug, Strings } from '../../system';
 
 const nameStatusDiffRegex = /^(.*?)\t(.*?)(?:\t(.*?))?$/gm;
@@ -26,7 +27,9 @@ export class GitDiffParser {
 
 			[, previousStart, previousCount, currentStart, currentCount, hunk] = match;
 
+			previousCount = Number(previousCount) || 0;
 			previousStart = Number(previousStart) || 0;
+			currentCount = Number(currentCount) || 0;
 			currentStart = Number(currentStart) || 0;
 
 			hunks.push(
@@ -34,14 +37,20 @@ export class GitDiffParser {
 					// Stops excessive memory usage -- https://bugs.chromium.org/p/v8/issues/detail?id=2869
 					` ${hunk}`.substr(1),
 					{
-						start: currentStart,
-						end: currentStart + (Number(currentCount) || 0)
+						count: currentCount,
+						position: {
+							start: currentStart,
+							end: currentStart + (currentCount > 0 ? currentCount - 1 : 0),
+						},
 					},
 					{
-						start: previousStart,
-						end: previousStart + (Number(previousCount) || 0)
-					}
-				)
+						count: previousCount,
+						position: {
+							start: previousStart,
+							end: previousStart + (previousCount > 0 ? previousCount - 1 : 0),
+						},
+					},
+				),
 			);
 		} while (true);
 
@@ -49,23 +58,27 @@ export class GitDiffParser {
 
 		const diff: GitDiff = {
 			diff: debug ? data : undefined,
-			hunks: hunks
+			hunks: hunks,
 		};
 		return diff;
 	}
 
 	@debug({ args: false, singleLine: true })
-	static parseHunk(hunk: GitDiffHunk): GitDiffHunkLine[] {
+	static parseHunk(hunk: GitDiffHunk): { lines: GitDiffHunkLine[]; state: 'added' | 'changed' | 'removed' } {
 		const currentLines: (GitDiffLine | undefined)[] = [];
 		const previousLines: (GitDiffLine | undefined)[] = [];
+
+		let hasAddedOrChanged;
+		let hasRemoved;
 
 		let removed = 0;
 		for (const l of Strings.lines(hunk.diff)) {
 			switch (l[0]) {
 				case '+':
+					hasAddedOrChanged = true;
 					currentLines.push({
 						line: ` ${l.substring(1)}`,
-						state: 'added'
+						state: 'added',
 					});
 
 					if (removed > 0) {
@@ -77,11 +90,12 @@ export class GitDiffParser {
 					break;
 
 				case '-':
+					hasRemoved = true;
 					removed++;
 
 					previousLines.push({
 						line: ` ${l.substring(1)}`,
-						state: 'removed'
+						state: 'removed',
 					});
 
 					break;
@@ -110,11 +124,14 @@ export class GitDiffParser {
 			hunkLines.push({
 				hunk: hunk,
 				current: currentLines[i],
-				previous: previousLines[i]
+				previous: previousLines[i],
 			});
 		}
 
-		return hunkLines;
+		return {
+			lines: hunkLines,
+			state: hasAddedOrChanged && hasRemoved ? 'changed' : hasAddedOrChanged ? 'added' : 'removed',
+		};
 	}
 
 	@debug({ args: false, singleLine: true })
@@ -137,6 +154,7 @@ export class GitDiffParser {
 			files.push({
 				repoPath: repoPath,
 				status: (!status.startsWith('.') ? status[0].trim() : '?') as GitFileStatus,
+				conflictStatus: undefined,
 				indexStatus: undefined,
 				workingTreeStatus: undefined,
 				// Stops excessive memory usage -- https://bugs.chromium.org/p/v8/issues/detail?id=2869
@@ -145,7 +163,7 @@ export class GitDiffParser {
 				originalFileName:
 					originalFileName == null || originalFileName.length === 0
 						? undefined
-						: ` ${originalFileName}`.substr(1)
+						: ` ${originalFileName}`.substr(1),
 			});
 		} while (true);
 
@@ -164,7 +182,7 @@ export class GitDiffParser {
 		const diffShortStat: GitDiffShortStat = {
 			files: files == null ? 0 : parseInt(files, 10),
 			insertions: insertions == null ? 0 : parseInt(insertions, 10),
-			deletions: deletions == null ? 0 : parseInt(deletions, 10)
+			deletions: deletions == null ? 0 : parseInt(deletions, 10),
 		};
 
 		return diffShortStat;

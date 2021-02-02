@@ -1,14 +1,26 @@
 'use strict';
 import { TreeItem, TreeItemCollapsibleState } from 'vscode';
-import { GlyphChars } from '../../constants';
+import { GlyphChars, NamedRef } from '../../constants';
 import { Container } from '../../container';
-import { CompareView } from '../compareView';
-import { CompareNode } from './compareNode';
-import { ResourceType, unknownGitUri, ViewNode } from './viewNode';
+import { SearchAndCompareView, SearchAndCompareViewNode } from '../searchAndCompareView';
+import { ContextValues, unknownGitUri, ViewNode } from './viewNode';
 
-export class ComparePickerNode extends ViewNode<CompareView> {
-	constructor(view: CompareView, protected readonly parent: CompareNode) {
+interface RepoRef {
+	label: string;
+	repoPath: string;
+	ref: string | NamedRef;
+}
+
+export class ComparePickerNode extends ViewNode<SearchAndCompareView> {
+	readonly order: number = Date.now();
+	readonly pinned: boolean = false;
+
+	constructor(view: SearchAndCompareView, parent: SearchAndCompareViewNode, public readonly selectedRef: RepoRef) {
 		super(unknownGitUri, view, parent);
+	}
+
+	get canDismiss(): boolean {
+		return true;
 	}
 
 	getChildren(): ViewNode[] {
@@ -16,41 +28,41 @@ export class ComparePickerNode extends ViewNode<CompareView> {
 	}
 
 	async getTreeItem(): Promise<TreeItem> {
-		const selectedRef = this.parent.selectedRef;
-		const repoPath = selectedRef !== undefined ? selectedRef.repoPath : undefined;
+		const selectedRef = this.selectedRef;
+		const repoPath = selectedRef?.repoPath;
 
 		let description;
 		if (repoPath !== undefined) {
 			if ((await Container.git.getRepositoryCount()) > 1) {
 				const repo = await Container.git.getRepository(repoPath);
-				description = (repo && repo.formattedName) || repoPath;
+				description = repo?.formattedName ?? repoPath;
 			}
 		}
 
 		let item;
-		if (selectedRef === undefined) {
+		if (selectedRef == null) {
 			item = new TreeItem(
 				'Compare <branch, tag, or ref> with <branch, tag, or ref>',
-				TreeItemCollapsibleState.None
+				TreeItemCollapsibleState.None,
 			);
-			item.contextValue = ResourceType.ComparePicker;
+			item.contextValue = ContextValues.ComparePicker;
 			item.description = description;
 			item.tooltip = `Click to select or enter a reference for compare${GlyphChars.Ellipsis}`;
 			item.command = {
 				title: `Compare${GlyphChars.Ellipsis}`,
-				command: this.view.getQualifiedCommand('selectForCompare')
+				command: this.view.getQualifiedCommand('selectForCompare'),
 			};
 		} else {
 			item = new TreeItem(
 				`Compare ${selectedRef.label} with <branch, tag, or ref>`,
-				TreeItemCollapsibleState.None
+				TreeItemCollapsibleState.None,
 			);
-			item.contextValue = ResourceType.ComparePickerWithRef;
+			item.contextValue = ContextValues.ComparePickerWithRef;
 			item.description = description;
 			item.tooltip = `Click to compare ${selectedRef.label} with${GlyphChars.Ellipsis}`;
 			item.command = {
 				title: `Compare ${selectedRef.label} with${GlyphChars.Ellipsis}`,
-				command: this.view.getQualifiedCommand('compareWithSelected')
+				command: this.view.getQualifiedCommand('compareWithSelected'),
 			};
 		}
 

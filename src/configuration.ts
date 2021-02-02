@@ -3,22 +3,18 @@ export * from './config';
 
 import {
 	ConfigurationChangeEvent,
+	ConfigurationScope,
 	ConfigurationTarget,
 	Event,
 	EventEmitter,
 	ExtensionContext,
 	Uri,
-	workspace
+	workspace,
 } from 'vscode';
 import { Config } from './config';
-import { extensionId } from './constants';
 import { Objects } from './system';
 
-const emptyConfig: Config = new Proxy<Config>({} as Config, {
-	get: function() {
-		return emptyConfig;
-	}
-});
+const extensionId = 'gitlens';
 
 type ConfigInspection<T> = {
 	key: string;
@@ -36,7 +32,7 @@ export interface ConfigurationWillChangeEvent {
 export class Configuration {
 	static configure(context: ExtensionContext) {
 		context.subscriptions.push(
-			workspace.onDidChangeConfiguration(configuration.onConfigurationChanged, configuration)
+			workspace.onDidChangeConfiguration(configuration.onConfigurationChanged, configuration),
 		);
 	}
 
@@ -56,14 +52,14 @@ export class Configuration {
 	}
 
 	private onConfigurationChanged(e: ConfigurationChangeEvent) {
-		if (!e.affectsConfiguration(extensionId, null!)) {
+		if (!e.affectsConfiguration(extensionId)) {
 			this._onDidChangeAny.fire(e);
 
 			return;
 		}
 
 		const evt: ConfigurationWillChangeEvent = {
-			change: e
+			change: e,
 		};
 		this._onWillChange.fire(evt);
 
@@ -75,24 +71,22 @@ export class Configuration {
 		this._onDidChange.fire(e);
 	}
 
-	readonly initializingChangeEvent: ConfigurationChangeEvent = {
-		affectsConfiguration: (section: string, resource?: Uri) => true
-	};
+	readonly initializingChangeEvent: ConfigurationChangeEvent = { affectsConfiguration: () => true };
 
 	get(): Config;
-	get<S1 extends keyof Config>(s1: S1, resource?: Uri | null, defaultValue?: Config[S1]): Config[S1];
+	get<S1 extends keyof Config>(s1: S1, scope?: ConfigurationScope | null, defaultValue?: Config[S1]): Config[S1];
 	get<S1 extends keyof Config, S2 extends keyof Config[S1]>(
 		s1: S1,
 		s2: S2,
-		resource?: Uri | null,
-		defaultValue?: Config[S1][S2]
+		scope?: ConfigurationScope | null,
+		defaultValue?: Config[S1][S2],
 	): Config[S1][S2];
 	get<S1 extends keyof Config, S2 extends keyof Config[S1], S3 extends keyof Config[S1][S2]>(
 		s1: S1,
 		s2: S2,
 		s3: S3,
-		resource?: Uri | null,
-		defaultValue?: Config[S1][S2][S3]
+		scope?: ConfigurationScope | null,
+		defaultValue?: Config[S1][S2][S3],
 	): Config[S1][S2][S3];
 	get<
 		S1 extends keyof Config,
@@ -104,12 +98,12 @@ export class Configuration {
 		s2: S2,
 		s3: S3,
 		s4: S4,
-		resource?: Uri | null,
-		defaultValue?: Config[S1][S2][S3][S4]
+		scope?: ConfigurationScope | null,
+		defaultValue?: Config[S1][S2][S3][S4],
 	): Config[S1][S2][S3][S4];
 	get<T>(...args: any[]): T {
 		let section: string | undefined;
-		let resource: Uri | null | undefined;
+		let scope: ConfigurationScope | null | undefined;
 		let defaultValue: T | undefined;
 		if (args.length > 0) {
 			section = args[0];
@@ -119,103 +113,113 @@ export class Configuration {
 					section += `.${args[2]}`;
 					if (typeof args[3] === 'string') {
 						section += `.${args[3]}`;
-						resource = args[4];
+						scope = args[4];
 						defaultValue = args[5];
 					} else {
-						resource = args[3];
+						scope = args[3];
 						defaultValue = args[4];
 					}
 				} else {
-					resource = args[2];
+					scope = args[2];
 					defaultValue = args[3];
 				}
 			} else {
-				resource = args[1];
+				scope = args[1];
 				defaultValue = args[2];
 			}
 		}
 
 		return defaultValue === undefined
 			? workspace
-					.getConfiguration(section === undefined ? undefined : extensionId, resource)
+					.getConfiguration(section === undefined ? undefined : extensionId, scope)
 					.get<T>(section === undefined ? extensionId : section)!
 			: workspace
-					.getConfiguration(section === undefined ? undefined : extensionId, resource)
+					.getConfiguration(section === undefined ? undefined : extensionId, scope)
 					.get<T>(section === undefined ? extensionId : section, defaultValue)!;
 	}
 
-	getAny<T>(section: string, resource?: Uri | null, defaultValue?: T) {
+	getAny<T>(section: string, scope?: ConfigurationScope | null): T | undefined;
+	getAny<T>(section: string, scope: ConfigurationScope | null | undefined, defaultValue: T): T;
+	getAny<T>(section: string, scope?: ConfigurationScope | null, defaultValue?: T) {
 		return defaultValue === undefined
-			? workspace.getConfiguration(undefined, resource).get<T>(section)!
-			: workspace.getConfiguration(undefined, resource).get<T>(section, defaultValue)!;
+			? workspace.getConfiguration(undefined, scope).get<T>(section)
+			: workspace.getConfiguration(undefined, scope).get<T>(section, defaultValue);
 	}
 
-	changed<S1 extends keyof Config>(e: ConfigurationChangeEvent, s1: S1, resource?: Uri | null): boolean;
+	changed<S1 extends keyof Config>(e: ConfigurationChangeEvent, s1: S1, scope?: ConfigurationScope | null): boolean;
 	changed<S1 extends keyof Config, S2 extends keyof Config[S1]>(
 		e: ConfigurationChangeEvent,
 		s1: S1,
 		s2: S2,
-		resource?: Uri | null
+		scope?: ConfigurationScope | null,
 	): boolean;
 	changed<S1 extends keyof Config, S2 extends keyof Config[S1], S3 extends keyof Config[S1][S2]>(
 		e: ConfigurationChangeEvent,
 		s1: S1,
 		s2: S2,
 		s3: S3,
-		resource?: Uri | null
+		scope?: ConfigurationScope | null,
 	): boolean;
 	changed<
 		S1 extends keyof Config,
 		S2 extends keyof Config[S1],
 		S3 extends keyof Config[S1][S2],
 		S4 extends keyof Config[S1][S2][S3]
-	>(e: ConfigurationChangeEvent, s1: S1, s2: S2, s3: S3, s4: S4, resource?: Uri | null): boolean;
+	>(e: ConfigurationChangeEvent, s1: S1, s2: S2, s3: S3, s4: S4, scope?: ConfigurationScope | null): boolean;
 	changed(e: ConfigurationChangeEvent, ...args: any[]) {
 		let section: string = args[0];
-		let resource: Uri | null | undefined;
+		let scope: ConfigurationScope | null | undefined;
 		if (typeof args[1] === 'string') {
 			section += `.${args[1]}`;
 			if (typeof args[2] === 'string') {
 				section += `.${args[2]}`;
 				if (typeof args[3] === 'string') {
 					section += args[3];
-					resource = args[4];
+					scope = args[4];
 				} else {
-					resource = args[3];
+					scope = args[3];
 				}
 			} else {
-				resource = args[2];
+				scope = args[2];
 			}
 		} else {
-			resource = args[1];
+			scope = args[1];
 		}
 
-		// eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
-		return e.affectsConfiguration(`${extensionId}.${section}`, resource!);
+		return e.affectsConfiguration(`${extensionId}.${section}`, scope!);
 	}
 
 	initializing(e: ConfigurationChangeEvent) {
 		return e === this.initializingChangeEvent;
 	}
 
-	inspect<S1 extends keyof Config>(s1: S1, resource?: Uri | null): ConfigInspection<Config[S1]> | undefined;
+	inspect<S1 extends keyof Config>(
+		s1: S1,
+		scope?: ConfigurationScope | null,
+	): ConfigInspection<Config[S1]> | undefined;
 	inspect<S1 extends keyof Config, S2 extends keyof Config[S1]>(
 		s1: S1,
 		s2: S2,
-		resource?: Uri | null
+		scope?: ConfigurationScope | null,
 	): ConfigInspection<Config[S1][S2]> | undefined;
 	inspect<S1 extends keyof Config, S2 extends keyof Config[S1], S3 extends keyof Config[S1][S2]>(
 		s1: S1,
 		s2: S2,
 		s3: S3,
-		resource?: Uri | null
+		scope?: ConfigurationScope | null,
 	): ConfigInspection<Config[S1][S2][S3]> | undefined;
 	inspect<
 		S1 extends keyof Config,
 		S2 extends keyof Config[S1],
 		S3 extends keyof Config[S1][S2],
 		S4 extends keyof Config[S1][S2][S3]
-	>(s1: S1, s2: S2, s3: S3, s4: S4, resource?: Uri | null): ConfigInspection<Config[S1][S2][S3][S4]> | undefined;
+	>(
+		s1: S1,
+		s2: S2,
+		s3: S3,
+		s4: S4,
+		scope?: ConfigurationScope | null,
+	): ConfigInspection<Config[S1][S2][S3][S4]> | undefined;
 	inspect(...args: any[]) {
 		let section: string = args[0];
 		let resource: Uri | null | undefined;
@@ -241,27 +245,27 @@ export class Configuration {
 			.inspect(section === undefined ? extensionId : section);
 	}
 
-	inspectAny(section: string, resource?: Uri | null) {
-		return workspace.getConfiguration(undefined, resource).inspect(section);
+	inspectAny<T>(section: string, scope?: ConfigurationScope | null) {
+		return workspace.getConfiguration(undefined, scope).inspect<T>(section);
 	}
 
 	migrate<S1 extends keyof Config>(
 		from: string,
 		to1: S1,
-		options: { fallbackValue?: Config[S1]; migrationFn?(value: any): Config[S1] }
+		options: { fallbackValue?: Config[S1]; migrationFn?(value: any): Config[S1] },
 	): Promise<boolean>;
 	migrate<S1 extends keyof Config, S2 extends keyof Config[S1]>(
 		from: string,
 		to1: S1,
 		to2: S2,
-		options: { fallbackValue?: Config[S1][S2]; migrationFn?(value: any): Config[S1][S2] }
+		options: { fallbackValue?: Config[S1][S2]; migrationFn?(value: any): Config[S1][S2] },
 	): Promise<boolean>;
 	migrate<S1 extends keyof Config, S2 extends keyof Config[S1], S3 extends keyof Config[S1][S2]>(
 		from: string,
 		to1: S1,
 		to2: S2,
 		to3: S3,
-		options: { fallbackValue?: Config[S1][S2][S3]; migrationFn?(value: any): Config[S1][S2][S3] }
+		options: { fallbackValue?: Config[S1][S2][S3]; migrationFn?(value: any): Config[S1][S2][S3] },
 	): Promise<boolean>;
 	migrate<
 		S1 extends keyof Config,
@@ -274,7 +278,7 @@ export class Configuration {
 		to2: S2,
 		to3: S3,
 		to4: S4,
-		options: { fallbackValue?: Config[S1][S2][S3][S4]; migrationFn?(value: any): Config[S1][S2][S3][S4] }
+		options: { fallbackValue?: Config[S1][S2][S3][S4]; migrationFn?(value: any): Config[S1][S2][S3][S4] },
 	): Promise<boolean>;
 	async migrate(from: string, ...args: any[]): Promise<boolean> {
 		let to: string = args[0];
@@ -307,8 +311,8 @@ export class Configuration {
 		if (inspection.globalValue !== undefined) {
 			await this.update(
 				to as any,
-				options.migrationFn ? options.migrationFn(inspection.globalValue) : inspection.globalValue,
-				ConfigurationTarget.Global
+				options.migrationFn != null ? options.migrationFn(inspection.globalValue) : inspection.globalValue,
+				ConfigurationTarget.Global,
 			);
 			migrated = true;
 			// Can't delete the old setting currently because it errors with `Unable to write to User Settings because <setting name> is not a registered configuration`
@@ -323,8 +327,10 @@ export class Configuration {
 		if (inspection.workspaceValue !== undefined) {
 			await this.update(
 				to as any,
-				options.migrationFn ? options.migrationFn(inspection.workspaceValue) : inspection.workspaceValue,
-				ConfigurationTarget.Workspace
+				options.migrationFn != null
+					? options.migrationFn(inspection.workspaceValue)
+					: inspection.workspaceValue,
+				ConfigurationTarget.Workspace,
 			);
 			migrated = true;
 			// Can't delete the old setting currently because it errors with `Unable to write to User Settings because <setting name> is not a registered configuration`
@@ -339,10 +345,10 @@ export class Configuration {
 		if (inspection.workspaceFolderValue !== undefined) {
 			await this.update(
 				to as any,
-				options.migrationFn
+				options.migrationFn != null
 					? options.migrationFn(inspection.workspaceFolderValue)
 					: inspection.workspaceFolderValue,
-				ConfigurationTarget.WorkspaceFolder
+				ConfigurationTarget.WorkspaceFolder,
 			);
 			migrated = true;
 			// Can't delete the old setting currently because it errors with `Unable to write to User Settings because <setting name> is not a registered configuration`
@@ -365,20 +371,20 @@ export class Configuration {
 	migrateIfMissing<S1 extends keyof Config>(
 		from: string,
 		to1: S1,
-		options: { migrationFn?(value: any): Config[S1] }
+		options: { migrationFn?(value: any): Config[S1] },
 	): Promise<void>;
 	migrateIfMissing<S1 extends keyof Config, S2 extends keyof Config[S1]>(
 		from: string,
 		to1: S1,
 		to2: S2,
-		options: { migrationFn?(value: any): Config[S1][S2] }
+		options: { migrationFn?(value: any): Config[S1][S2] },
 	): Promise<void>;
 	migrateIfMissing<S1 extends keyof Config, S2 extends keyof Config[S1], S3 extends keyof Config[S1][S2]>(
 		from: string,
 		to1: S1,
 		to2: S2,
 		to3: S3,
-		options: { migrationFn?(value: any): Config[S1][S2][S3] }
+		options: { migrationFn?(value: any): Config[S1][S2][S3] },
 	): Promise<void>;
 	migrateIfMissing<
 		S1 extends keyof Config,
@@ -391,7 +397,7 @@ export class Configuration {
 		to2: S2,
 		to3: S3,
 		to4: S4,
-		options: { migrationFn?(value: any): Config[S1][S2][S3][S4] }
+		options: { migrationFn?(value: any): Config[S1][S2][S3][S4] },
 	): Promise<void>;
 	async migrateIfMissing(from: string, ...args: any[]): Promise<void> {
 		let to: string = args[0];
@@ -426,8 +432,10 @@ export class Configuration {
 			if (toInspection === undefined || toInspection.globalValue === undefined) {
 				await this.update(
 					to as any,
-					options.migrationFn ? options.migrationFn(fromInspection.globalValue) : fromInspection.globalValue,
-					ConfigurationTarget.Global
+					options.migrationFn != null
+						? options.migrationFn(fromInspection.globalValue)
+						: fromInspection.globalValue,
+					ConfigurationTarget.Global,
 				);
 				// Can't delete the old setting currently because it errors with `Unable to write to User Settings because <setting name> is not a registered configuration`
 				// if (from !== to) {
@@ -443,10 +451,10 @@ export class Configuration {
 			if (toInspection === undefined || toInspection.workspaceValue === undefined) {
 				await this.update(
 					to as any,
-					options.migrationFn
+					options.migrationFn != null
 						? options.migrationFn(fromInspection.workspaceValue)
 						: fromInspection.workspaceValue,
-					ConfigurationTarget.Workspace
+					ConfigurationTarget.Workspace,
 				);
 				// Can't delete the old setting currently because it errors with `Unable to write to User Settings because <setting name> is not a registered configuration`
 				// if (from !== to) {
@@ -462,10 +470,10 @@ export class Configuration {
 			if (toInspection === undefined || toInspection.workspaceFolderValue === undefined) {
 				await this.update(
 					to as any,
-					options.migrationFn
+					options.migrationFn != null
 						? options.migrationFn(fromInspection.workspaceFolderValue)
 						: fromInspection.workspaceFolderValue,
-					ConfigurationTarget.WorkspaceFolder
+					ConfigurationTarget.WorkspaceFolder,
 				);
 				// Can't delete the old setting currently because it errors with `Unable to write to User Settings because <setting name> is not a registered configuration`
 				// if (from !== to) {
@@ -483,7 +491,7 @@ export class Configuration {
 	name<S1 extends keyof Config, S2 extends keyof Config[S1], S3 extends keyof Config[S1][S2]>(
 		s1: S1,
 		s2: S2,
-		s3: S3
+		s3: S3,
 	): string;
 	name<
 		S1 extends keyof Config,
@@ -500,7 +508,7 @@ export class Configuration {
 		s1: S1,
 		s2: S2,
 		value: Config[S1][S2] | undefined,
-		target: ConfigurationTarget
+		target: ConfigurationTarget,
 	): Thenable<void>;
 
 	update<S1 extends keyof Config, S2 extends keyof Config[S1], S3 extends keyof Config[S1][S2]>(
@@ -508,7 +516,7 @@ export class Configuration {
 		s2: S2,
 		s3: S3,
 		value: Config[S1][S2][S3] | undefined,
-		target: ConfigurationTarget
+		target: ConfigurationTarget,
 	): Thenable<void>;
 	update<
 		S1 extends keyof Config,
@@ -521,7 +529,7 @@ export class Configuration {
 		s3: S3,
 		s4: S4,
 		value: Config[S1][S2][S3][S4] | undefined,
-		target: ConfigurationTarget
+		target: ConfigurationTarget,
 	): Thenable<void>;
 	update(...args: any[]) {
 		let section: string = args[0];
@@ -551,9 +559,9 @@ export class Configuration {
 		return workspace.getConfiguration(extensionId).update(section, value, target);
 	}
 
-	updateAny(section: string, value: any, target: ConfigurationTarget, resource?: Uri | null) {
+	updateAny(section: string, value: any, target: ConfigurationTarget, scope?: ConfigurationScope | null) {
 		return workspace
-			.getConfiguration(undefined, target === ConfigurationTarget.Global ? undefined : resource!)
+			.getConfiguration(undefined, target === ConfigurationTarget.Global ? undefined : scope!)
 			.update(section, value, target);
 	}
 
@@ -561,13 +569,13 @@ export class Configuration {
 	updateEffective<S1 extends keyof Config, S2 extends keyof Config[S1]>(
 		s1: S1,
 		s2: S2,
-		value: Config[S1][S2]
+		value: Config[S1][S2],
 	): Thenable<void>;
 	updateEffective<S1 extends keyof Config, S2 extends keyof Config[S1], S3 extends keyof Config[S1][S2]>(
 		s1: S1,
 		s2: S2,
 		s3: S3,
-		value: Config[S1][S2][S3]
+		value: Config[S1][S2][S3],
 	): Thenable<void>;
 	updateEffective<
 		S1 extends keyof Config,
@@ -615,7 +623,7 @@ export class Configuration {
 		return configuration.update(
 			section as any,
 			Objects.areEquivalent(value, inspect.defaultValue) ? undefined : value,
-			ConfigurationTarget.Global
+			ConfigurationTarget.Global,
 		);
 	}
 }

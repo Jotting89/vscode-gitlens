@@ -1,35 +1,44 @@
+/* eslint-disable @typescript-eslint/naming-convention */
 'use strict';
-/* eslint-disable @typescript-eslint/camelcase */
 import * as paths from 'path';
-import * as fs from 'fs';
+import { TextDecoder } from 'util';
 import * as iconv from 'iconv-lite';
+import { Uri, window, workspace } from 'vscode';
 import { GlyphChars } from '../constants';
 import { Container } from '../container';
 import { Logger } from '../logger';
 import { Objects, Strings } from '../system';
 import { findGitPath, GitLocation } from './locator';
-import { run, RunOptions } from './shell';
+import { fsExists, run, RunError, RunOptions } from './shell';
 import { GitBranchParser, GitLogParser, GitReflogParser, GitStashParser, GitTagParser } from './parsers/parsers';
-import { GitFileStatus } from './models/file';
+import { GitRevision } from './models/models';
 
 export * from './models/models';
 export * from './parsers/parsers';
+export * from './formatters/formatters';
 export * from './remotes/provider';
+export * from './search';
+export { RunError } from './shell';
 
-export type GitLogDiffFilter = Exclude<GitFileStatus, '!' | '?'>;
+export type GitDiffFilter = 'A' | 'C' | 'D' | 'M' | 'R' | 'T' | 'U' | 'X' | 'B' | '*';
 
 const emptyArray = (Object.freeze([]) as any) as any[];
 const emptyObj = Object.freeze({});
 const emptyStr = '';
+export const maxGitCliLength = 30000;
 const slash = '/';
+
+const textDecoder = new TextDecoder('utf8');
 
 // This is a root sha of all git repo's if using sha1
 const rootSha = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 
 export const GitErrors = {
 	badRevision: /bad revision '(.*?)'/i,
+	noFastForward: /\(non-fast-forward\)/i,
+	noMergeBase: /no merge base/i,
 	notAValidObjectName: /Not a valid object name/i,
-	invalidLineCount: /file .+? has only \d+ lines/i
+	invalidLineCount: /file .+? has only \d+ lines/i,
 };
 
 const GitWarnings = {
@@ -46,12 +55,12 @@ const GitWarnings = {
 	patchWithConflicts: /Applied patch to '.*?' with conflicts/i,
 	noRemoteRepositorySpecified: /No remote repository specified\./i,
 	remoteConnectionError: /Could not read from remote repository/i,
-	notAGitCommand: /'.+' is not a git command/i
+	notAGitCommand: /'.+' is not a git command/i,
 };
 
 export enum GitErrorHandling {
 	Ignore = 'ignore',
-	Throw = 'throw'
+	Throw = 'throw',
 }
 
 export interface GitCommandOptions extends RunOptions {
@@ -63,7 +72,7 @@ export interface GitCommandOptions extends RunOptions {
 }
 
 // A map of running git commands -- avoids running duplicate overlaping commands
-const pendingCommands: Map<string, Promise<string | Buffer>> = new Map();
+const pendingCommands = new Map<string, Promise<string | Buffer>>();
 
 export async function git<TOut extends string | Buffer>(options: GitCommandOptions, ...args: any[]): Promise<TOut> {
 	if (Container.vsls.isMaybeGuest) {
@@ -82,7 +91,7 @@ export async function git<TOut extends string | Buffer>(options: GitCommandOptio
 
 	const { configs, correlationKey, errors: errorHandling, ...opts } = options;
 
-	const encoding = options.encoding || 'utf8';
+	const encoding = options.encoding ?? 'utf8';
 	const runOpts: RunOptions = {
 		...opts,
 		encoding: encoding === 'utf8' ? 'utf8' : encoding === 'buffer' ? 'buffer' : 'binary',
@@ -90,11 +99,11 @@ export async function git<TOut extends string | Buffer>(options: GitCommandOptio
 		// Shouldn't *really* be needed but better safe than sorry
 		env: {
 			...process.env,
-			...(options.env || emptyObj),
+			...(options.env ?? emptyObj),
 			GCM_INTERACTIVE: 'NEVER',
 			GCM_PRESERVE_CREDS: 'TRUE',
-			LC_ALL: 'C'
-		}
+			LC_ALL: 'C',
+		},
 	};
 
 	const gitCommand = `[${runOpts.cwd}] git ${args.join(' ')}`;
@@ -115,14 +124,19 @@ export async function git<TOut extends string | Buffer>(options: GitCommandOptio
 			'core.quotepath=false',
 			'-c',
 			'color.ui=false',
-			...(configs !== undefined ? configs : emptyArray)
+			...(configs !== undefined ? configs : emptyArray),
 		);
+
+		if (process.platform === 'win32') {
+			args.splice(0, 0, '-c', 'core.longpaths=true');
+		}
 
 		promise = run<TOut>(gitInfo.path, args, encoding, runOpts);
 
 		pendingCommands.set(command, promise);
 	} else {
 		waiting = true;
+		Logger.debug(`${gitCommand} ${GlyphChars.Dot} waiting...`);
 	}
 
 	let exception: Error | undefined;
@@ -148,20 +162,20 @@ export async function git<TOut extends string | Buffer>(options: GitCommandOptio
 	} finally {
 		pendingCommands.delete(command);
 
-		const duration = `${Strings.getDurationMilliseconds(start)} ms ${waiting ? '(await) ' : emptyStr}`;
+		const duration = `${Strings.getDurationMilliseconds(start)} ms ${waiting ? '(waited) ' : emptyStr}`;
 		if (exception !== undefined) {
 			Logger.warn(
 				`[${runOpts.cwd}] Git ${(exception.message || exception.toString() || emptyStr)
 					.trim()
 					.replace(/fatal: /g, '')
-					.replace(/\r?\n|\r/g, ` ${GlyphChars.Dot} `)} ${GlyphChars.Dot} ${duration}`
+					.replace(/\r?\n|\r/g, ` ${GlyphChars.Dot} `)} ${GlyphChars.Dot} ${duration}`,
 			);
 		} else {
 			Logger.log(`${gitCommand} ${GlyphChars.Dot} ${duration}`);
 		}
 		Logger.logGitCommand(
 			`${gitCommand} ${GlyphChars.Dot} ${exception !== undefined ? 'FAILED ' : emptyStr}${duration}`,
-			exception
+			exception,
 		);
 	}
 }
@@ -176,18 +190,18 @@ function defaultExceptionHandler(ex: Error, cwd: string | undefined, start?: [nu
 					`[${cwd}] Git ${msg
 						.trim()
 						.replace(/fatal: /g, '')
-						.replace(/\r?\n|\r/g, ` ${GlyphChars.Dot} `)} ${GlyphChars.Dot} ${duration}`
+						.replace(/\r?\n|\r/g, ` ${GlyphChars.Dot} `)} ${GlyphChars.Dot} ${duration}`,
 				);
 				return emptyStr;
 			}
 		}
 
 		const match = GitErrors.badRevision.exec(msg);
-		if (match != null && match) {
+		if (match != null) {
 			const [, ref] = match;
 
 			// Since looking up a ref with ^3 (e.g. looking for untracked files in a stash) can error on some versions of git just ignore it
-			if (ref != null && ref.endsWith('^3')) return emptyStr;
+			if (ref?.endsWith('^3')) return emptyStr;
 		}
 	}
 
@@ -197,16 +211,6 @@ function defaultExceptionHandler(ex: Error, cwd: string | undefined, start?: [nu
 let gitInfo: GitLocation;
 
 export namespace Git {
-	export const deletedOrMissingSha = '0000000000000000000000000000000000000000-';
-	export const shaLikeRegex = /(^[0-9a-f]{40}([\^@~:]\S*)?$)|(^[0]{40}(:|-)$)/;
-	export const shaRegex = /(^[0-9a-f]{40}$)|(^[0]{40}(:|-)$)/;
-	export const shaParentRegex = /(^[0-9a-f]{40})\^[0-3]?$/;
-	export const shaShortenRegex = /^(.*?)([\^@~:].*)?$/;
-	export const uncommittedRegex = /^[0]{40}(?:[\^@~:]\S*)?:?$/;
-	export const uncommittedSha = '0000000000000000000000000000000000000000';
-	export const uncommittedStagedRegex = /^[0]{40}([\^@~]\S*)?:$/;
-	export const uncommittedStagedSha = '0000000000000000000000000000000000000000:';
-
 	export function getEncoding(encoding: string | undefined) {
 		return encoding !== undefined && iconv.encodingExists(encoding) ? encoding : 'utf8';
 	}
@@ -219,7 +223,7 @@ export namespace Git {
 		return gitInfo.version;
 	}
 
-	export async function setOrFindGitPath(gitPath?: string): Promise<void> {
+	export async function setOrFindGitPath(gitPath?: string | string[]): Promise<void> {
 		const start = process.hrtime();
 
 		gitInfo = await findGitPath(gitPath);
@@ -227,69 +231,14 @@ export namespace Git {
 		Logger.log(
 			`Git found: ${gitInfo.version} @ ${gitInfo.path === 'git' ? 'PATH' : gitInfo.path} ${
 				GlyphChars.Dot
-			} ${Strings.getDurationMilliseconds(start)} ms`
+			} ${Strings.getDurationMilliseconds(start)} ms`,
 		);
-	}
-
-	export function isSha(ref: string) {
-		return isMatch(Git.shaRegex, ref);
-	}
-
-	export function isShaLike(ref: string) {
-		return isMatch(Git.shaLikeRegex, ref);
-	}
-
-	export function isShaParent(ref: string) {
-		return isMatch(Git.shaParentRegex, ref);
-	}
-
-	export function isUncommitted(ref: string | undefined) {
-		return isMatch(Git.uncommittedRegex, ref);
-	}
-
-	export function isUncommittedStaged(ref: string | undefined): boolean {
-		return isMatch(Git.uncommittedStagedRegex, ref);
-	}
-
-	export function shortenSha(
-		ref: string | undefined,
-		{
-			force,
-			strings = {}
-		}: {
-			force?: boolean;
-			strings?: { uncommitted?: string; uncommittedStaged?: string; working?: string };
-		} = {}
-	) {
-		if (ref == null || ref.length === 0) return strings.working || emptyStr;
-		if (Git.isUncommitted(ref)) {
-			return Git.isUncommittedStaged(ref)
-				? strings.uncommittedStaged || 'Index'
-				: strings.uncommitted || 'Working Tree';
-		}
-
-		if (!force && !Git.isShaLike(ref)) return ref;
-
-		// Don't allow shas to be shortened to less than 5 characters
-		const len = Math.max(5, Container.config.advanced.abbreviatedShaLength);
-
-		// If we have a suffix, append it
-		const match = Git.shaShortenRegex.exec(ref);
-		if (match != null) {
-			const [, rev, suffix] = match;
-
-			if (suffix != null) {
-				return `${rev.substr(0, len)}${suffix}`;
-			}
-		}
-
-		return ref.substr(0, len);
 	}
 
 	export function splitPath(
 		fileName: string,
 		repoPath: string | undefined,
-		extract: boolean = true
+		extract: boolean = true,
 	): [string, string] {
 		if (repoPath) {
 			fileName = Strings.normalizePath(fileName);
@@ -312,10 +261,6 @@ export namespace Git {
 		return parseInt(gitMajor, 10) >= major && parseInt(gitMinor, 10) >= minor;
 	}
 
-	function isMatch(regex: RegExp, ref: string | undefined) {
-		return ref == null || ref.length === 0 ? false : regex.test(ref);
-	}
-
 	// Git commands
 
 	export function add(repoPath: string | undefined, pathspec: string) {
@@ -336,7 +281,7 @@ export namespace Git {
 		repoPath: string | undefined,
 		fileName: string,
 		ref?: string,
-		options: { args?: string[] | null; ignoreWhitespace?: boolean; startLine?: number; endLine?: number } = {}
+		options: { args?: string[] | null; ignoreWhitespace?: boolean; startLine?: number; endLine?: number } = {},
 	) {
 		const [file, root] = Git.splitPath(fileName, repoPath);
 
@@ -358,7 +303,7 @@ export namespace Git {
 				if (supported) {
 					let ignoreRevsFile = params[index + 1];
 					if (!paths.isAbsolute(ignoreRevsFile)) {
-						ignoreRevsFile = paths.join(repoPath || '', ignoreRevsFile);
+						ignoreRevsFile = paths.join(repoPath ?? emptyStr, ignoreRevsFile);
 					}
 
 					const exists = ignoreRevsFileMap.get(ignoreRevsFile);
@@ -367,9 +312,7 @@ export namespace Git {
 					} else {
 						// Ensure the specified --ignore-revs-file exists, otherwise the blame will fail
 						try {
-							supported = await new Promise(resolve =>
-								fs.exists(ignoreRevsFile, exists => resolve(exists))
-							);
+							supported = await fsExists(ignoreRevsFile);
 						} catch {
 							supported = false;
 						}
@@ -386,7 +329,7 @@ export namespace Git {
 
 		let stdin;
 		if (ref) {
-			if (Git.isUncommittedStaged(ref)) {
+			if (GitRevision.isUncommittedStaged(ref)) {
 				// Pipe the blame contents to stdin
 				params.push('--contents', '-');
 
@@ -410,7 +353,7 @@ export namespace Git {
 			ignoreWhitespace?: boolean;
 			startLine?: number;
 			endLine?: number;
-		} = {}
+		} = {},
 	) {
 		const [file, root] = Git.splitPath(fileName, repoPath);
 
@@ -433,50 +376,41 @@ export namespace Git {
 			{ cwd: root, stdin: contents, correlationKey: options.correlationKey },
 			...params,
 			'--',
-			file
+			file,
 		);
 	}
 
-	export function branch__contains(repoPath: string, ref: string, { remotes = false }: { remotes?: boolean } = {}) {
+	export function branch__containsOrPointsAt(
+		repoPath: string,
+		ref: string,
+		{
+			mode = 'contains',
+			name = undefined,
+			remotes = false,
+		}: { mode?: 'contains' | 'pointsAt'; name?: string; remotes?: boolean } = {},
+	) {
 		const params = ['branch'];
 		if (remotes) {
 			params.push('-r');
 		}
-		params.push('--contains');
+		params.push(mode === 'pointsAt' ? `--points-at=${ref}` : `--contains=${ref}`, '--format=%(refname:short)');
+		if (name != null) {
+			params.push(name);
+		}
 
-		return git<string>({ cwd: repoPath, configs: ['-c', 'color.branch=false'] }, ...params, ref);
+		return git<string>(
+			{ cwd: repoPath, configs: ['-c', 'color.branch=false'], errors: GitErrorHandling.Ignore },
+			...params,
+		);
 	}
 
-	export async function cat_file__resolve(repoPath: string, fileName: string, ref: string) {
-		if (Git.isUncommitted(ref)) return ref;
-
-		try {
-			void (await git<string>(
-				{ cwd: repoPath, errors: GitErrorHandling.Throw },
-				'cat-file',
-				'-e',
-				`${ref}:./${fileName}`
-			));
-			return ref;
-		} catch (ex) {
-			const msg = ex && ex.toString();
-			if (GitErrors.notAValidObjectName.test(msg)) {
-				return Git.deletedOrMissingSha;
-			}
-
-			return undefined;
-		}
-	}
-
-	export async function cat_file__validate(repoPath: string, ref: string) {
-		if (Git.isUncommitted(ref)) return true;
-
-		try {
-			void (await git<string>({ cwd: repoPath, errors: GitErrorHandling.Throw }, 'cat-file', '-t', ref));
-			return true;
-		} catch (ex) {
-			return false;
-		}
+	export function check_ignore(repoPath: string, ...files: string[]) {
+		return git<string>(
+			{ cwd: repoPath, errors: GitErrorHandling.Ignore, stdin: files.join('\0') },
+			'check-ignore',
+			'-z',
+			'--stdin',
+		);
 	}
 
 	export function check_mailmap(repoPath: string, author: string) {
@@ -486,7 +420,7 @@ export namespace Git {
 	export async function check_ref_format(
 		ref: string,
 		repoPath?: string,
-		options: { branch?: boolean } = { branch: true }
+		options: { branch?: boolean } = { branch: true },
 	) {
 		const params = ['check-ref-format'];
 		if (options.branch) {
@@ -497,11 +431,11 @@ export namespace Git {
 
 		try {
 			const data = await git<string>(
-				{ cwd: repoPath || emptyStr, errors: GitErrorHandling.Throw, local: true },
+				{ cwd: repoPath ?? emptyStr, errors: GitErrorHandling.Throw, local: true },
 				...params,
-				ref
+				ref,
 			);
-			return data.trim();
+			return Boolean(data.trim());
 		} catch {
 			return false;
 		}
@@ -510,7 +444,7 @@ export namespace Git {
 	export function checkout(
 		repoPath: string,
 		ref: string,
-		{ createBranch, fileName }: { createBranch?: string; fileName?: string } = {}
+		{ createBranch, fileName }: { createBranch?: string; fileName?: string } = {},
 	) {
 		const params = ['checkout'];
 		if (createBranch) {
@@ -530,20 +464,20 @@ export namespace Git {
 
 	export async function config__get(key: string, repoPath?: string, options: { local?: boolean } = {}) {
 		const data = await git<string>(
-			{ cwd: repoPath || emptyStr, errors: GitErrorHandling.Ignore, local: options.local },
+			{ cwd: repoPath ?? emptyStr, errors: GitErrorHandling.Ignore, local: options.local },
 			'config',
 			'--get',
-			key
+			key,
 		);
 		return data.length === 0 ? undefined : data.trim();
 	}
 
 	export async function config__get_regex(pattern: string, repoPath?: string, options: { local?: boolean } = {}) {
 		const data = await git<string>(
-			{ cwd: repoPath || emptyStr, errors: GitErrorHandling.Ignore, local: options.local },
+			{ cwd: repoPath ?? emptyStr, errors: GitErrorHandling.Ignore, local: options.local },
 			'config',
 			'--get-regex',
-			pattern
+			pattern,
 		);
 		return data.length === 0 ? undefined : data.trim();
 	}
@@ -553,17 +487,26 @@ export namespace Git {
 		fileName: string,
 		ref1?: string,
 		ref2?: string,
-		options: { encoding?: string; filter?: string; similarityThreshold?: number | null } = {}
+		options: {
+			encoding?: string;
+			filters?: GitDiffFilter[];
+			linesOfContext?: number;
+			renames?: boolean;
+			similarityThreshold?: number | null;
+		} = {},
 	): Promise<string> {
-		const params = [
-			'diff',
-			`-M${options.similarityThreshold == null ? '' : `${options.similarityThreshold}%`}`,
-			'--no-ext-diff',
-			'-U0',
-			'--minimal'
-		];
-		if (options.filter) {
-			params.push(`--diff-filter=${options.filter}`);
+		const params = ['diff', '--no-ext-diff', '--minimal'];
+
+		if (options.linesOfContext != null) {
+			params.push(`-U${options.linesOfContext}`);
+		}
+
+		if (options.renames) {
+			params.push(`-M${options.similarityThreshold == null ? '' : `${options.similarityThreshold}%`}`);
+		}
+
+		if (options.filters != null && options.filters.length !== 0) {
+			params.push(`--diff-filter=${options.filters.join(emptyStr)}`);
 		}
 
 		if (ref1) {
@@ -571,20 +514,22 @@ export namespace Git {
 			if (ref1.endsWith('^3^')) {
 				ref1 = rootSha;
 			}
-			params.push(Git.isUncommittedStaged(ref1) ? '--staged' : ref1);
+			params.push(GitRevision.isUncommittedStaged(ref1) ? '--staged' : ref1);
 		}
 		if (ref2) {
-			params.push(Git.isUncommittedStaged(ref2) ? '--staged' : ref2);
+			params.push(GitRevision.isUncommittedStaged(ref2) ? '--staged' : ref2);
 		}
-
-		const encoding: BufferEncoding = options.encoding === 'utf8' ? 'utf8' : 'binary';
 
 		try {
 			return await git<string>(
-				{ cwd: repoPath, configs: ['-c', 'color.diff=false'], encoding: encoding },
+				{
+					cwd: repoPath,
+					configs: ['-c', 'color.diff=false'],
+					encoding: options.encoding === 'utf8' ? 'utf8' : 'binary',
+				},
 				...params,
 				'--',
-				fileName
+				fileName,
 			);
 		} catch (ex) {
 			const match = GitErrors.badRevision.exec(ex.message);
@@ -601,20 +546,80 @@ export namespace Git {
 		}
 	}
 
+	export async function diff__contents(
+		repoPath: string,
+		fileName: string,
+		ref: string,
+		contents: string,
+		options: { encoding?: string; filters?: GitDiffFilter[]; similarityThreshold?: number | null } = {},
+	): Promise<string> {
+		const params = [
+			'diff',
+			`-M${options.similarityThreshold == null ? '' : `${options.similarityThreshold}%`}`,
+			'--no-ext-diff',
+			'-U0',
+			'--minimal',
+		];
+
+		if (options.filters != null && options.filters.length !== 0) {
+			params.push(`--diff-filter=${options.filters.join(emptyStr)}`);
+		}
+
+		// // <sha>^3 signals an untracked file in a stash and if we are trying to find its parent, use the root sha
+		// if (ref.endsWith('^3^')) {
+		// 	ref = rootSha;
+		// }
+		// params.push(GitRevision.isUncommittedStaged(ref) ? '--staged' : ref);
+
+		params.push('--no-index');
+
+		try {
+			return await git<string>(
+				{
+					cwd: repoPath,
+					configs: ['-c', 'color.diff=false'],
+					encoding: options.encoding === 'utf8' ? 'utf8' : 'binary',
+					stdin: contents,
+				},
+				...params,
+				'--',
+				fileName,
+				// Pipe the contents to stdin
+				'-',
+			);
+		} catch (ex) {
+			if (ex instanceof RunError && ex.stdout) {
+				return ex.stdout;
+			}
+
+			const match = GitErrors.badRevision.exec(ex.message);
+			if (match !== null) {
+				const [, matchedRef] = match;
+
+				// If the bad ref is trying to find a parent ref, assume we hit to the last commit, so try again using the root sha
+				if (matchedRef === ref && matchedRef != null && matchedRef.endsWith('^')) {
+					return Git.diff__contents(repoPath, fileName, rootSha, contents, options);
+				}
+			}
+
+			throw ex;
+		}
+	}
+
 	export function diff__name_status(
 		repoPath: string,
 		ref1?: string,
 		ref2?: string,
-		{ filter, similarityThreshold }: { filter?: string; similarityThreshold?: number | null } = {}
+		{ filters, similarityThreshold }: { filters?: GitDiffFilter[]; similarityThreshold?: number | null } = {},
 	) {
 		const params = [
 			'diff',
 			'--name-status',
 			`-M${similarityThreshold == null ? '' : `${similarityThreshold}%`}`,
-			'--no-ext-diff'
+			'--no-ext-diff',
 		];
-		if (filter) {
-			params.push(`--diff-filter=${filter}`);
+		if (filters != null && filters.length !== 0) {
+			params.push(`--diff-filter=${filters.join(emptyStr)}`);
 		}
 		if (ref1) {
 			params.push(ref1);
@@ -623,23 +628,32 @@ export namespace Git {
 			params.push(ref2);
 		}
 
-		return git<string>({ cwd: repoPath, configs: ['-c', 'color.diff=false'] }, ...params);
+		return git<string>({ cwd: repoPath, configs: ['-c', 'color.diff=false'] }, ...params, '--');
 	}
 
-	export function diff__shortstat(repoPath: string, ref?: string) {
+	export async function diff__shortstat(repoPath: string, ref?: string) {
 		const params = ['diff', '--shortstat', '--no-ext-diff'];
 		if (ref) {
 			params.push(ref);
 		}
 
-		return git<string>({ cwd: repoPath, configs: ['-c', 'color.diff=false'] }, ...params);
+		try {
+			return await git<string>({ cwd: repoPath, configs: ['-c', 'color.diff=false'] }, ...params, '--');
+		} catch (ex) {
+			const msg: string = ex?.toString() ?? '';
+			if (GitErrors.noMergeBase.test(msg)) {
+				return undefined;
+			}
+
+			throw ex;
+		}
 	}
 
 	export function difftool(
 		repoPath: string,
 		fileName: string,
 		tool: string,
-		options: { ref1?: string; ref2?: string; staged?: boolean } = {}
+		options: { ref1?: string; ref2?: string; staged?: boolean } = {},
 	) {
 		const params = ['difftool', '--no-prompt', `--tool=${tool}`];
 		if (options.staged) {
@@ -664,19 +678,54 @@ export namespace Git {
 		return git<string>({ cwd: repoPath }, ...params);
 	}
 
-	export function fetch(repoPath: string, options: { all?: boolean; prune?: boolean; remote?: string } = {}) {
+	export async function fetch(
+		repoPath: string,
+		options:
+			| { all?: boolean; branch?: undefined; prune?: boolean; remote?: string }
+			| {
+					all?: undefined;
+					branch: string;
+					prune?: undefined;
+					pull?: boolean;
+					remote: string;
+					upstream: string;
+			  } = {},
+	): Promise<void> {
 		const params = ['fetch'];
+
 		if (options.prune) {
 			params.push('--prune');
 		}
 
-		if (options.remote) {
+		if (options.branch && options.remote) {
+			if (options.upstream && options.pull) {
+				params.push('-u', options.remote, `${options.upstream}:${options.branch}`);
+
+				try {
+					void (await git<string>({ cwd: repoPath }, ...params));
+					return;
+				} catch (ex) {
+					const msg: string = ex?.toString() ?? '';
+					if (GitErrors.noFastForward.test(msg)) {
+						void window.showErrorMessage(
+							`Unable to pull the '${options.branch}' branch, as it can't be fast-forwarded.`,
+						);
+
+						return;
+					}
+
+					throw ex;
+				}
+			} else {
+				params.push(options.remote, options.branch);
+			}
+		} else if (options.remote) {
 			params.push(options.remote);
 		} else if (options.all) {
 			params.push('--all');
 		}
 
-		return git<string>({ cwd: repoPath }, ...params);
+		void (await git<string>({ cwd: repoPath }, ...params));
 	}
 
 	export function for_each_ref__branch(repoPath: string, options: { all: boolean } = { all: false }) {
@@ -693,38 +742,51 @@ export namespace Git {
 		ref: string | undefined,
 		{
 			authors,
+			format = 'default',
 			limit,
 			merges,
 			reverse,
-			similarityThreshold
+			similarityThreshold,
+			since,
 		}: {
 			authors?: string[];
+			format?: 'refs' | 'default';
 			limit?: number;
 			merges?: boolean;
 			reverse?: boolean;
 			similarityThreshold?: number | null;
-		}
+			since?: string;
+		},
 	) {
 		const params = [
 			'log',
-			'--name-status',
-			`--format=${GitLogParser.defaultFormat}`,
+			`--format=${format === 'refs' ? GitLogParser.simpleRefs : GitLogParser.defaultFormat}`,
 			'--full-history',
-			`-M${similarityThreshold == null ? '' : `${similarityThreshold}%`}`
+			`-M${similarityThreshold == null ? '' : `${similarityThreshold}%`}`,
+			'-m',
 		];
+
+		if (format !== 'refs') {
+			params.push('--name-status');
+		}
+
 		if (limit && !reverse) {
-			params.push(`-n${limit}`);
+			params.push(`-n${limit + 1}`);
 		}
 
-		if (merges) {
-			params.push('-m');
+		if (since) {
+			params.push(`--since="${since}"`);
 		}
 
-		if (authors) {
+		if (!merges) {
+			params.push('--first-parent');
+		}
+
+		if (authors != null && authors.length !== 0) {
 			params.push('--use-mailmap', ...authors.map(a => `--author=${a}`));
 		}
 
-		if (ref && !Git.isUncommittedStaged(ref)) {
+		if (ref && !GitRevision.isUncommittedStaged(ref)) {
 			// If we are reversing, we must add a range (with HEAD) because we are using --ancestry-path for better reverse walking
 			if (reverse) {
 				params.push('--reverse', '--ancestry-path', `${ref}..HEAD`);
@@ -736,7 +798,7 @@ export namespace Git {
 		return git<string>(
 			{ cwd: repoPath, configs: ['-c', 'diff.renameLimit=0', '-c', 'log.showSignature=false'] },
 			...params,
-			'--'
+			'--',
 		);
 	}
 
@@ -745,54 +807,82 @@ export namespace Git {
 		fileName: string,
 		ref: string | undefined,
 		{
+			all,
 			filters,
-			limit,
 			firstParent = false,
+			format = 'default',
+			limit,
 			renames = true,
 			reverse = false,
-			simple = false,
+			since,
+			skip,
 			startLine,
-			endLine
+			endLine,
 		}: {
-			filters?: GitLogDiffFilter[];
-			limit?: number;
+			all?: boolean;
+			filters?: GitDiffFilter[];
 			firstParent?: boolean;
+			format?: 'refs' | 'simple' | 'default';
+			limit?: number;
 			renames?: boolean;
 			reverse?: boolean;
-			simple?: boolean;
+			since?: string;
+			skip?: number;
 			startLine?: number;
 			endLine?: number;
-		} = {}
+		} = {},
 	) {
 		const [file, root] = Git.splitPath(fileName, repoPath);
 
-		const params = ['log', `--format=${simple ? GitLogParser.simpleFormat : GitLogParser.defaultFormat}`];
+		const params = [
+			'log',
+			`--format=${format === 'default' ? GitLogParser.defaultFormat : GitLogParser.simpleFormat}`,
+		];
 
 		if (limit && !reverse) {
-			params.push(`-n${limit}`);
+			params.push(`-n${limit + 1}`);
 		}
+
+		if (skip) {
+			params.push(`--skip=${skip}`);
+		}
+
+		if (since) {
+			params.push(`--since="${since}"`);
+		}
+
+		if (all) {
+			params.push('--all');
+		}
+
+		// Can't allow rename detection (`--follow`) if `all` or a `startLine` is specified
+		if (renames && (all || startLine != null)) {
+			renames = false;
+		}
+
 		params.push(renames ? '--follow' : '-m');
+		if (/*renames ||*/ firstParent) {
+			params.push('--first-parent');
+		}
 
 		if (filters != null && filters.length !== 0) {
 			params.push(`--diff-filter=${filters.join(emptyStr)}`);
 		}
 
-		if (firstParent) {
-			params.push('--first-parent');
-		}
-
-		if (startLine == null) {
-			if (simple) {
-				params.push('--name-status');
+		if (format !== 'refs') {
+			if (startLine == null) {
+				if (format === 'simple') {
+					params.push('--name-status');
+				} else {
+					params.push('--numstat', '--summary');
+				}
 			} else {
-				params.push('--numstat', '--summary');
+				// Don't include `--name-status`, `--numstat`, or `--summary` because they aren't supported with `-L`
+				params.push(`-L ${startLine},${endLine == null ? startLine : endLine}:${file}`);
 			}
-		} else {
-			// Don't include --name-status or -s because Git won't honor it
-			params.push(`-L ${startLine},${endLine == null ? startLine : endLine}:${file}`);
 		}
 
-		if (ref && !Git.isUncommittedStaged(ref)) {
+		if (ref && !GitRevision.isUncommittedStaged(ref)) {
 			// If we are reversing, we must add a range (with HEAD) because we are using --ancestry-path for better reverse walking
 			if (reverse) {
 				params.push('--reverse', '--ancestry-path', `${ref}..HEAD`);
@@ -801,8 +891,8 @@ export namespace Git {
 			}
 		}
 
-		if (startLine == null || renames) {
-			// Don't specify a file spec when using a line number (so say the git docs), unless it is a follow
+		// Don't specify a file spec when using a line number (so say the git docs)
+		if (startLine == null) {
 			params.push('--', file);
 		}
 
@@ -812,13 +902,13 @@ export namespace Git {
 	export async function log__file_recent(
 		repoPath: string,
 		fileName: string,
-		{ ref, similarityThreshold }: { ref?: string; similarityThreshold?: number | null } = {}
+		{ ref, similarityThreshold }: { ref?: string; similarityThreshold?: number | null } = {},
 	) {
 		const params = [
 			'log',
 			`-M${similarityThreshold == null ? '' : `${similarityThreshold}%`}`,
 			'-n1',
-			'--format=%H'
+			'--format=%H',
 		];
 
 		if (ref) {
@@ -829,13 +919,23 @@ export namespace Git {
 		return data.length === 0 ? undefined : data.trim();
 	}
 
+	export async function log__find_object(repoPath: string, objectId: string, ref: string, file?: string) {
+		const params = ['log', '-n1', '--no-renames', '--format=%H', `--find-object=${objectId}`, ref];
+		if (file) {
+			params.push('--', file);
+		}
+
+		const data = await git<string>({ cwd: repoPath, errors: GitErrorHandling.Ignore }, ...params);
+		return data.length === 0 ? undefined : data.trim();
+	}
+
 	export async function log__recent(repoPath: string) {
 		const data = await git<string>(
 			{ cwd: repoPath, errors: GitErrorHandling.Ignore },
 			'log',
 			'-n1',
 			'--format=%H',
-			'--'
+			'--',
 		);
 		return data.length === 0 ? undefined : data.trim();
 	}
@@ -846,7 +946,7 @@ export namespace Git {
 			'log',
 			'-n1',
 			'--format=%ct',
-			'--'
+			'--',
 		);
 		return data.length === 0 ? undefined : data.trim();
 	}
@@ -854,16 +954,16 @@ export namespace Git {
 	export function log__search(
 		repoPath: string,
 		search: string[] = emptyArray,
-		{ limit, skip, useShow }: { limit?: number; skip?: number; useShow?: boolean } = {}
+		{ limit, skip, useShow }: { limit?: number; skip?: number; useShow?: boolean } = {},
 	) {
 		const params = [
 			useShow ? 'show' : 'log',
 			'--name-status',
 			`--format=${GitLogParser.defaultFormat}`,
-			'--use-mailmap'
+			'--use-mailmap',
 		];
 		if (limit && !useShow) {
-			params.push(`-n${limit}`);
+			params.push(`-n${limit + 1}`);
 		}
 		if (skip && !useShow) {
 			params.push(`--skip=${skip}`);
@@ -874,7 +974,7 @@ export namespace Git {
 
 	// export function log__shortstat(repoPath: string, options: { ref?: string }) {
 	//     const params = ['log', '--shortstat', '--oneline'];
-	//     if (options.ref && !Git.isUncommittedStaged(options.ref)) {
+	//     if (options.ref && !GitRevision.isUncommittedStaged(options.ref)) {
 	//         params.push(options.ref);
 	//     }
 	//     return git<string>({ cwd: repoPath }, ...params, '--');
@@ -883,10 +983,10 @@ export namespace Git {
 	export async function ls_files(
 		repoPath: string,
 		fileName: string,
-		{ ref, untracked }: { ref?: string; untracked?: boolean } = {}
+		{ ref, untracked }: { ref?: string; untracked?: boolean } = {},
 	): Promise<string | undefined> {
 		const params = ['ls-files'];
-		if (ref && !Git.isUncommitted(ref)) {
+		if (ref && !GitRevision.isUncommitted(ref)) {
 			params.push(`--with-tree=${ref}`);
 		}
 
@@ -913,7 +1013,7 @@ export namespace Git {
 		repoPath: string,
 		ref1: string,
 		ref2: string,
-		{ forkPoint }: { forkPoint?: boolean } = {}
+		{ forkPoint }: { forkPoint?: boolean } = {},
 	) {
 		const params = ['merge-base'];
 		if (forkPoint) {
@@ -925,7 +1025,7 @@ export namespace Git {
 
 	export function reflog(
 		repoPath: string,
-		{ all, branch, limit, skip }: { all?: boolean; branch?: string; limit?: number; skip?: number } = {}
+		{ all, branch, limit, skip }: { all?: boolean; branch?: string; limit?: number; skip?: number } = {},
 	): Promise<string> {
 		const params = ['log', '--walk-reflogs', `--format=${GitReflogParser.defaultFormat}`, '--date=iso8601'];
 		if (all) {
@@ -964,28 +1064,51 @@ export namespace Git {
 		return git<string>({ cwd: repoPath }, 'reset', '-q', '--', fileName);
 	}
 
-	export async function rev_list(
-		repoPath: string,
-		refs: string[],
-		options: { count?: boolean } = {}
-	): Promise<number | undefined> {
-		const params = [];
-		if (options.count) {
-			params.push('--count');
-		}
-		params.push(...refs);
+	export async function rev_list__count(repoPath: string, ref: string): Promise<number | undefined> {
+		let data = await git<string>(
+			{ cwd: repoPath, errors: GitErrorHandling.Ignore },
+			'rev-list',
+			'--count',
+			ref,
+			'--',
+		);
+		data = data.trim();
+		if (data.length === 0) return undefined;
 
-		const data = await git<string>({ cwd: repoPath, errors: GitErrorHandling.Ignore }, 'rev-list', ...params);
-		return data.length === 0 ? undefined : Number(data.trim()) || undefined;
+		const result = parseInt(data, 10);
+		return isNaN(result) ? undefined : result;
 	}
 
-	export async function rev_parse(repoPath: string, ref: string): Promise<string | undefined> {
-		const data = await git<string>({ cwd: repoPath, errors: GitErrorHandling.Ignore }, 'rev-parse', ref);
-		return data.length === 0 ? undefined : data.trim();
+	export async function rev_list__left_right(
+		repoPath: string,
+		refs: string[],
+	): Promise<{ ahead: number; behind: number } | undefined> {
+		const data = await git<string>(
+			{ cwd: repoPath, errors: GitErrorHandling.Ignore },
+			'rev-list',
+			'--left-right',
+			'--count',
+			...refs,
+			'--',
+		);
+		if (data.length === 0) return undefined;
+
+		const parts = data.split('\t');
+		if (parts.length !== 2) return undefined;
+
+		const [ahead, behind] = parts;
+		const result = {
+			ahead: parseInt(ahead, 10),
+			behind: parseInt(behind, 10),
+		};
+
+		if (isNaN(result.ahead) || isNaN(result.behind)) return undefined;
+
+		return result;
 	}
 
 	export async function rev_parse__currentBranch(
-		repoPath: string
+		repoPath: string,
 	): Promise<[string, string | undefined] | undefined> {
 		try {
 			const data = await git<string>(
@@ -995,20 +1118,43 @@ export namespace Git {
 				'--symbolic-full-name',
 				'@',
 				'@{u}',
-				'--'
+				'--',
 			);
 			return [data, undefined];
 		} catch (ex) {
-			const msg = ex && ex.toString();
+			const msg: string = ex?.toString() ?? '';
 			if (GitErrors.badRevision.test(msg) || GitWarnings.noUpstream.test(msg)) {
-				return [ex.stdout, undefined];
+				if (ex.stdout != null && ex.stdout.length !== 0) {
+					return [ex.stdout, undefined];
+				}
+
+				const defaultBranch = (await config__get('init.defaultBranch', repoPath, { local: true })) ?? 'main';
+				const branchConfig = await config__get_regex(`branch\\.${defaultBranch}\\.+`, repoPath, {
+					local: true,
+				});
+
+				let remote;
+				let remoteBranch;
+
+				if (branchConfig) {
+					let match = /^branch\..+\.remote\s(.+)$/m.exec(branchConfig);
+					if (match != null) {
+						remote = match[1];
+					}
+
+					match = /^branch\..+\.merge\srefs\/heads\/(.+)$/m.exec(branchConfig);
+					if (match != null) {
+						remoteBranch = match[1];
+					}
+				}
+				return [`${defaultBranch}${remote && remoteBranch ? `\n${remote}/${remoteBranch}` : ''}`, undefined];
 			}
 
 			if (GitWarnings.headNotABranch.test(msg)) {
 				const sha = await log__recent(repoPath);
 				if (sha === undefined) return undefined;
 
-				return [`(HEAD detached at ${shortenSha(sha)})`, sha];
+				return [`(HEAD detached at ${GitRevision.shorten(sha)})`, sha];
 			}
 
 			defaultExceptionHandler(ex, repoPath);
@@ -1017,13 +1163,51 @@ export namespace Git {
 	}
 
 	export async function rev_parse__show_toplevel(cwd: string): Promise<string | undefined> {
-		const data = await git<string>({ cwd: cwd, errors: GitErrorHandling.Ignore }, 'rev-parse', '--show-toplevel');
-		// Make sure to normalize: https://github.com/git-for-windows/git/issues/2478
-		return data.length === 0 ? undefined : Strings.normalizePath(data.trim());
+		try {
+			const data = await git<string>(
+				{ cwd: cwd, errors: GitErrorHandling.Throw },
+				'rev-parse',
+				'--show-toplevel',
+			);
+			// Make sure to normalize: https://github.com/git-for-windows/git/issues/2478
+			// Keep trailing spaces which are part of the directory name
+			return data.length === 0 ? undefined : Strings.normalizePath(data.trimLeft().replace(/[\r|\n]+$/, ''));
+		} catch (ex) {
+			if (ex.code === 'ENOENT') {
+				// If the `cwd` doesn't exist, walk backward to see if any parent folder exists
+				let exists = await fsExists(cwd);
+				if (!exists) {
+					do {
+						const parent = paths.dirname(cwd);
+						if (parent === cwd || parent.length === 0) return undefined;
+
+						cwd = parent;
+						exists = await fsExists(cwd);
+					} while (!exists);
+
+					return rev_parse__show_toplevel(cwd);
+				}
+			}
+			return undefined;
+		}
+	}
+
+	export async function rev_parse__verify(
+		repoPath: string,
+		ref: string,
+		filename?: string,
+	): Promise<string | undefined> {
+		const data = await git<string>(
+			{ cwd: repoPath, errors: GitErrorHandling.Ignore },
+			'rev-parse',
+			'--verify',
+			filename ? `${ref}:./${filename}` : `${ref}^{commit}`,
+		);
+		return data.length === 0 ? undefined : data.trim();
 	}
 
 	export function shortlog(repoPath: string) {
-		return git<string>({ cwd: repoPath }, 'shortlog', '-sne', '--all', '--no-merges');
+		return git<string>({ cwd: repoPath }, 'shortlog', '-sne', '--all', '--no-merges', 'HEAD');
 	}
 
 	export async function show<TOut extends string | Buffer>(
@@ -1032,28 +1216,28 @@ export namespace Git {
 		ref: string,
 		options: {
 			encoding?: 'binary' | 'ascii' | 'utf8' | 'utf16le' | 'ucs2' | 'base64' | 'latin1' | 'hex' | 'buffer';
-		} = {}
+		} = {},
 	): Promise<TOut | undefined> {
 		const [file, root] = Git.splitPath(fileName, repoPath);
 
-		if (Git.isUncommittedStaged(ref)) {
+		if (GitRevision.isUncommittedStaged(ref)) {
 			ref = ':';
 		}
-		if (Git.isUncommitted(ref)) throw new Error(`ref=${ref} is uncommitted`);
+		if (GitRevision.isUncommitted(ref)) throw new Error(`ref=${ref} is uncommitted`);
 
 		const opts: GitCommandOptions = {
 			configs: ['-c', 'log.showSignature=false'],
 			cwd: root,
-			encoding: options.encoding || 'utf8',
-			errors: GitErrorHandling.Throw
+			encoding: options.encoding ?? 'utf8',
+			errors: GitErrorHandling.Throw,
 		};
 		const args = ref.endsWith(':') ? `${ref}./${file}` : `${ref}:./${file}`;
 
 		try {
-			const data = await git<TOut>(opts, 'show', args, '--');
+			const data = await git<TOut>(opts, 'show', '--textconv', args, '--');
 			return data;
 		} catch (ex) {
-			const msg = ex && ex.toString();
+			const msg: string = ex?.toString() ?? '';
 			if (ref === ':' && GitErrors.badRevision.test(msg)) {
 				return Git.show<TOut>(repoPath, fileName, 'HEAD:', options);
 			}
@@ -1075,7 +1259,7 @@ export namespace Git {
 		fileName: string,
 		ref: string,
 		originalFileName?: string,
-		{ similarityThreshold }: { similarityThreshold?: number | null } = {}
+		{ similarityThreshold }: { similarityThreshold?: number | null } = {},
 	) {
 		const params = [
 			'show',
@@ -1085,7 +1269,7 @@ export namespace Git {
 			'-U0',
 			ref,
 			'--',
-			fileName
+			fileName,
 		];
 		if (originalFileName != null && originalFileName.length !== 0) {
 			params.push(originalFileName);
@@ -1107,8 +1291,22 @@ export namespace Git {
 		return git<string>({ cwd: repoPath }, 'stash', deleteAfter ? 'pop' : 'apply', stashName);
 	}
 
-	export function stash__delete(repoPath: string, stashName: string) {
+	export async function stash__delete(repoPath: string, stashName: string, ref?: string) {
 		if (!stashName) return undefined;
+
+		if (ref) {
+			const stashRef = await git<string>(
+				{ cwd: repoPath, errors: GitErrorHandling.Ignore },
+				'show',
+				'--format=%H',
+				'--no-patch',
+				stashName,
+			);
+			if (stashRef?.trim() !== ref) {
+				throw new Error('Unable to delete stash; mismatch with stash number');
+			}
+		}
+
 		return git<string>({ cwd: repoPath }, 'stash', 'drop', stashName);
 	}
 
@@ -1116,8 +1314,8 @@ export namespace Git {
 		repoPath: string,
 		{
 			format = GitStashParser.defaultFormat,
-			similarityThreshold
-		}: { format?: string; similarityThreshold?: number | null } = {}
+			similarityThreshold,
+		}: { format?: string; similarityThreshold?: number | null } = {},
 	) {
 		return git<string>(
 			{ cwd: repoPath },
@@ -1125,22 +1323,23 @@ export namespace Git {
 			'list',
 			'--name-status',
 			`-M${similarityThreshold == null ? '' : `${similarityThreshold}%`}`,
-			`--format=${format}`
+			`--format=${format}`,
 		);
 	}
 
-	export function stash__push(
+	export async function stash__push(
 		repoPath: string,
 		message?: string,
 		{
 			includeUntracked,
 			keepIndex,
-			pathspecs
-		}: { includeUntracked?: boolean; keepIndex?: boolean; pathspecs?: string[] } = {}
-	) {
+			pathspecs,
+			stdin,
+		}: { includeUntracked?: boolean; keepIndex?: boolean; pathspecs?: string[]; stdin?: boolean } = {},
+	): Promise<void> {
 		const params = ['stash', 'push'];
 
-		if (includeUntracked || (pathspecs !== undefined && pathspecs.length !== 0)) {
+		if (includeUntracked || (pathspecs != null && pathspecs.length !== 0)) {
 			params.push('-u');
 		}
 
@@ -1152,24 +1351,35 @@ export namespace Git {
 			params.push('-m', message);
 		}
 
+		if (stdin && pathspecs != null && pathspecs.length !== 0) {
+			void (await git<string>(
+				{ cwd: repoPath, stdin: pathspecs.join('\0') },
+				...params,
+				'--pathspec-from-file=-',
+				'--pathspec-file-nul',
+			));
+
+			return;
+		}
+
 		params.push('--');
-		if (pathspecs !== undefined && pathspecs.length !== 0) {
+		if (pathspecs != null && pathspecs.length !== 0) {
 			params.push(...pathspecs);
 		}
 
-		return git<string>({ cwd: repoPath }, ...params);
+		void (await git<string>({ cwd: repoPath }, ...params));
 	}
 
 	export function status(
 		repoPath: string,
 		porcelainVersion: number = 1,
-		{ similarityThreshold }: { similarityThreshold?: number | null } = {}
+		{ similarityThreshold }: { similarityThreshold?: number | null } = {},
 	): Promise<string> {
 		const params = [
 			'status',
 			porcelainVersion >= 2 ? `--porcelain=v${porcelainVersion}` : '--porcelain',
 			'--branch',
-			'-u'
+			'-u',
 		];
 		if (Git.validateVersion(2, 18)) {
 			params.push(`--find-renames${similarityThreshold == null ? '' : `=${similarityThreshold}%`}`);
@@ -1178,7 +1388,7 @@ export namespace Git {
 		return git<string>(
 			{ cwd: repoPath, configs: ['-c', 'color.status=false'], env: { GIT_OPTIONAL_LOCKS: '0' } },
 			...params,
-			'--'
+			'--',
 		);
 	}
 
@@ -1186,7 +1396,7 @@ export namespace Git {
 		repoPath: string,
 		fileName: string,
 		porcelainVersion: number = 1,
-		{ similarityThreshold }: { similarityThreshold?: number | null } = {}
+		{ similarityThreshold }: { similarityThreshold?: number | null } = {},
 	): Promise<string> {
 		const [file, root] = Git.splitPath(fileName, repoPath);
 
@@ -1199,11 +1409,44 @@ export namespace Git {
 			{ cwd: root, configs: ['-c', 'color.status=false'], env: { GIT_OPTIONAL_LOCKS: '0' } },
 			...params,
 			'--',
-			file
+			file,
 		);
 	}
 
 	export function tag(repoPath: string) {
 		return git<string>({ cwd: repoPath }, 'tag', '-l', `--format=${GitTagParser.defaultFormat}`);
+	}
+
+	export async function readDotGitFile(
+		repoPath: string,
+		paths: string[],
+		options?: { numeric?: false; throw?: boolean; trim?: boolean },
+	): Promise<string | undefined>;
+	export async function readDotGitFile(
+		repoPath: string,
+		path: string[],
+		options?: { numeric: true; throw?: boolean; trim?: boolean },
+	): Promise<number | undefined>;
+	export async function readDotGitFile(
+		repoPath: string,
+		pathParts: string[],
+		options?: { numeric?: boolean; throw?: boolean; trim?: boolean },
+	): Promise<string | number | undefined> {
+		try {
+			const bytes = await workspace.fs.readFile(Uri.file(paths.join(...[repoPath, '.git', ...pathParts])));
+			let contents = textDecoder.decode(bytes);
+			contents = options?.trim ?? true ? contents.trim() : contents;
+
+			if (options?.numeric) {
+				const number = Number.parseInt(contents, 10);
+				return isNaN(number) ? undefined : number;
+			}
+
+			return contents;
+		} catch (ex) {
+			if (options?.throw) throw ex;
+
+			return undefined;
+		}
 	}
 }

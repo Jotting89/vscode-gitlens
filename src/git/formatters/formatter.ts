@@ -5,31 +5,33 @@ const emptyStr = '';
 
 export interface FormatOptions {
 	dateFormat?: string | null;
-	tokenOptions?: { [id: string]: Strings.TokenOptions | undefined };
+	tokenOptions?: Record<string, Strings.TokenOptions | undefined>;
 }
 
-type Constructor<T = {}> = new (...args: any[]) => T;
+type Constructor<T = Record<string, unknown>> = new (...args: any[]) => T;
 
+const hasTokenRegexMap = new Map<string, RegExp>();
 const spaceReplacementRegex = / /g;
 
-declare type RequiredTokenOptions<TOptions extends FormatOptions> = TOptions & Required<Pick<TOptions, 'tokenOptions'>>;
+declare type RequiredTokenOptions<Options extends FormatOptions> = Options & Required<Pick<Options, 'tokenOptions'>>;
 
-export abstract class Formatter<TItem = any, TOptions extends FormatOptions = FormatOptions> {
-	protected _item!: TItem;
-	protected _options!: RequiredTokenOptions<TOptions>;
+export abstract class Formatter<Item = any, Options extends FormatOptions = FormatOptions> {
+	protected _item!: Item;
+	protected _options!: RequiredTokenOptions<Options>;
 
-	constructor(item: TItem, options?: TOptions) {
+	constructor(item: Item, options?: Options) {
 		this.reset(item, options);
 	}
 
-	reset(item: TItem, options?: TOptions) {
+	reset(item: Item, options?: Options) {
 		this._item = item;
+		this.collapsableWhitespace = 0;
 
-		if (options === undefined && this._options !== undefined) return;
+		if (options == null && this._options != null) return;
 
-		if (options === undefined) {
+		if (options == null) {
 			// eslint-disable-next-line @typescript-eslint/consistent-type-assertions
-			options = {} as TOptions;
+			options = {} as Options;
 		}
 
 		if (options.dateFormat == null) {
@@ -40,7 +42,7 @@ export abstract class Formatter<TItem = any, TOptions extends FormatOptions = Fo
 			options.tokenOptions = {};
 		}
 
-		this._options = options as RequiredTokenOptions<TOptions>;
+		this._options = options as RequiredTokenOptions<Options>;
 	}
 
 	private collapsableWhitespace: number = 0;
@@ -49,18 +51,18 @@ export abstract class Formatter<TItem = any, TOptions extends FormatOptions = Fo
 		if (s == null || s.length === 0) return s;
 
 		// NOTE: the collapsable whitespace logic relies on the javascript template evaluation to be left to right
-		if (options === undefined) {
+		if (options == null) {
 			options = {
 				collapseWhitespace: false,
 				padDirection: 'left',
 				prefix: undefined,
 				suffix: undefined,
-				truncateTo: undefined
+				truncateTo: undefined,
 			};
 		}
 
 		let max = options.truncateTo;
-		if (max === undefined) {
+		if (max == null) {
 			this.collapsableWhitespace = 0;
 		} else {
 			max += this.collapsableWhitespace;
@@ -87,7 +89,7 @@ export abstract class Formatter<TItem = any, TOptions extends FormatOptions = Fo
 		}
 
 		if (options.prefix || options.suffix) {
-			s = `${options.prefix || emptyStr}${s}${options.suffix || emptyStr}`;
+			s = `${options.prefix ?? emptyStr}${s}${options.suffix ?? emptyStr}`;
 		}
 
 		return s;
@@ -95,26 +97,22 @@ export abstract class Formatter<TItem = any, TOptions extends FormatOptions = Fo
 
 	private static _formatter: Formatter | undefined = undefined;
 
-	protected static fromTemplateCore<
-		TFormatter extends Formatter<TItem, TOptions>,
-		TItem,
-		TOptions extends FormatOptions
-	>(
+	protected static fromTemplateCore<TFormatter extends Formatter<Item, Options>, Item, Options extends FormatOptions>(
 		formatter: TFormatter | Constructor<TFormatter>,
 		template: string,
-		item: TItem,
-		dateFormatOrOptions?: string | null | TOptions
+		item: Item,
+		dateFormatOrOptions?: string | null | Options,
 	): string {
 		// Preserve spaces
 		template = template.replace(spaceReplacementRegex, '\u00a0');
 		if (formatter instanceof Formatter) return Strings.interpolate(template, formatter);
 
-		let options: TOptions | undefined = undefined;
+		let options: Options | undefined = undefined;
 		if (dateFormatOrOptions == null || typeof dateFormatOrOptions === 'string') {
 			// eslint-disable-next-line @typescript-eslint/consistent-type-assertions
 			options = {
-				dateFormat: dateFormatOrOptions
-			} as TOptions;
+				dateFormat: dateFormatOrOptions,
+			} as Options;
 		} else {
 			options = dateFormatOrOptions;
 		}
@@ -130,12 +128,74 @@ export abstract class Formatter<TItem = any, TOptions extends FormatOptions = Fo
 			options.tokenOptions = tokenOptions;
 		}
 
-		if (this._formatter === undefined) {
+		if (this._formatter == null) {
 			this._formatter = new formatter(item, options);
 		} else {
 			this._formatter.reset(item, options);
 		}
 
 		return Strings.interpolate(template, this._formatter);
+	}
+
+	protected static fromTemplateCoreAsync<
+		TFormatter extends Formatter<Item, Options>,
+		Item,
+		Options extends FormatOptions
+	>(
+		formatter: TFormatter | Constructor<TFormatter>,
+		template: string,
+		item: Item,
+		dateFormatOrOptions?: string | null | Options,
+	): Promise<string> {
+		// Preserve spaces
+		template = template.replace(spaceReplacementRegex, '\u00a0');
+		if (formatter instanceof Formatter) return Strings.interpolateAsync(template, formatter);
+
+		let options: Options | undefined = undefined;
+		if (dateFormatOrOptions == null || typeof dateFormatOrOptions === 'string') {
+			// eslint-disable-next-line @typescript-eslint/consistent-type-assertions
+			options = {
+				dateFormat: dateFormatOrOptions,
+			} as Options;
+		} else {
+			options = dateFormatOrOptions;
+		}
+
+		if (options.tokenOptions == null) {
+			const tokenOptions = Strings.getTokensFromTemplate(template).reduce<{
+				[token: string]: Strings.TokenOptions | undefined;
+			}>((map, token) => {
+				map[token.key] = token.options;
+				return map;
+			}, Object.create(null));
+
+			options.tokenOptions = tokenOptions;
+		}
+
+		if (this._formatter == null) {
+			this._formatter = new formatter(item, options);
+		} else {
+			this._formatter.reset(item, options);
+		}
+
+		return Strings.interpolateAsync(template, this._formatter);
+	}
+
+	static has<TOptions extends FormatOptions>(
+		template: string,
+		...tokens: (keyof NonNullable<TOptions['tokenOptions']>)[]
+	): boolean {
+		const token =
+			tokens.length === 1
+				? (tokens[0] as string)
+				: ((`(${tokens.join('|')})` as keyof NonNullable<TOptions['tokenOptions']>) as string);
+
+		let regex = hasTokenRegexMap.get(token);
+		if (regex == null) {
+			regex = new RegExp(`\\b${token}\\b`);
+			hasTokenRegexMap.set(token, regex);
+		}
+
+		return regex.test(template);
 	}
 }

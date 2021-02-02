@@ -2,25 +2,29 @@
 import * as paths from 'path';
 import { Command, Selection, TreeItem, TreeItemCollapsibleState } from 'vscode';
 import { Commands, DiffWithPreviousCommandArgs } from '../../commands';
-import { GlyphChars } from '../../constants';
 import { Container } from '../../container';
-import { CommitFormatter, GitFile, GitLogCommit, GitUri, StatusFileFormatter } from '../../git/gitService';
-import { View } from '../viewBase';
-import { ResourceType, ViewNode, ViewRefFileNode } from './viewNode';
+import { GitBranch, GitFile, GitLogCommit, GitRevisionReference, StatusFileFormatter } from '../../git/git';
+import { GitUri } from '../../git/gitUri';
+import { View, ViewsWithCommits } from '../viewBase';
+import { ContextValues, ViewNode, ViewRefFileNode } from './viewNode';
 
-export class CommitFileNode extends ViewRefFileNode {
+export class CommitFileNode<TView extends View = ViewsWithCommits> extends ViewRefFileNode<TView> {
 	constructor(
-		view: View,
+		view: TView,
 		parent: ViewNode,
 		public readonly file: GitFile,
 		public commit: GitLogCommit,
-		private readonly _options: { displayAsCommit?: boolean; inFileHistory?: boolean; selection?: Selection } = {}
+		private readonly _options: {
+			branch?: GitBranch;
+			selection?: Selection;
+			unpublished?: boolean;
+		} = {},
 	) {
 		super(GitUri.fromFile(file, commit.repoPath, commit.sha), view, parent);
 	}
 
 	toClipboard(): string {
-		return this._options.displayAsCommit ? this.commit.sha : this.fileName;
+		return this.fileName;
 	}
 
 	get fileName(): string {
@@ -31,8 +35,8 @@ export class CommitFileNode extends ViewRefFileNode {
 		return 0;
 	}
 
-	get ref(): string {
-		return this.commit.sha;
+	get ref(): GitRevisionReference {
+		return this.commit;
 	}
 
 	getChildren(): ViewNode[] {
@@ -43,13 +47,13 @@ export class CommitFileNode extends ViewRefFileNode {
 		if (!this.commit.isFile) {
 			// See if we can get the commit directly from the multi-file commit
 			const commit = this.commit.toFileCommit(this.file);
-			if (commit === undefined) {
+			if (commit == null) {
 				const log = await Container.git.getLogForFile(this.repoPath, this.file.fileName, {
 					limit: 2,
-					ref: this.commit.sha
+					ref: this.commit.sha,
 				});
-				if (log !== undefined) {
-					this.commit = log.commits.get(this.commit.sha) || this.commit;
+				if (log != null) {
+					this.commit = log.commits.get(this.commit.sha) ?? this.commit;
 				}
 			} else {
 				this.commit = commit;
@@ -57,43 +61,38 @@ export class CommitFileNode extends ViewRefFileNode {
 		}
 
 		const item = new TreeItem(this.label, TreeItemCollapsibleState.None);
-		item.contextValue = this.resourceType;
+		item.contextValue = this.contextValue;
 		item.description = this.description;
 		item.tooltip = this.tooltip;
 
-		if (this._options.displayAsCommit && this.view.config.avatars) {
-			item.iconPath = this.commit.getGravatarUri(Container.config.defaultGravatarsStyle);
-		} else {
-			const icon = GitFile.getStatusIcon(this.file.status);
-			item.iconPath = {
-				dark: Container.context.asAbsolutePath(paths.join('images', 'dark', icon)),
-				light: Container.context.asAbsolutePath(paths.join('images', 'light', icon))
-			};
-		}
+		const icon = GitFile.getStatusIcon(this.file.status);
+		item.iconPath = {
+			dark: Container.context.asAbsolutePath(paths.join('images', 'dark', icon)),
+			light: Container.context.asAbsolutePath(paths.join('images', 'light', icon)),
+		};
 
 		item.command = this.getCommand();
 
-		// Only cache the label/description/tooltip for a single refresh
+		// Only cache the label for a single refresh (its only cached because it is used externally for sorting)
 		this._label = undefined;
-		this._description = undefined;
-		this._tooltip = undefined;
 
 		return item;
 	}
 
-	private _description: string | undefined;
-	get description() {
-		if (this._description === undefined) {
-			this._description = this._options.displayAsCommit
-				? CommitFormatter.fromTemplate(this.getCommitDescriptionTemplate(), this.commit, {
-						truncateMessageAtNewLine: true,
-						dateFormat: Container.config.defaultDateFormat
-				  })
-				: StatusFileFormatter.fromTemplate(this.getCommitFileDescriptionTemplate(), this.file, {
-						relativePath: this.relativePath
-				  });
+	protected get contextValue(): string {
+		if (!this.commit.isUncommitted) {
+			return `${ContextValues.File}+committed${this._options.branch?.current ? '+current' : ''}${
+				this._options.branch?.current && this._options.branch.sha === this.commit.ref ? '+HEAD' : ''
+			}${this._options.unpublished ? '+unpublished' : ''}`;
 		}
-		return this._description;
+
+		return this.commit.isUncommittedStaged ? `${ContextValues.File}+staged` : `${ContextValues.File}+unstaged`;
+	}
+
+	private get description() {
+		return StatusFileFormatter.fromTemplate(this.view.config.formats.files.description, this.file, {
+			relativePath: this.relativePath,
+		});
 	}
 
 	private _folderName: string | undefined;
@@ -107,14 +106,9 @@ export class CommitFileNode extends ViewRefFileNode {
 	private _label: string | undefined;
 	get label() {
 		if (this._label === undefined) {
-			this._label = this._options.displayAsCommit
-				? CommitFormatter.fromTemplate(this.getCommitTemplate(), this.commit, {
-						truncateMessageAtNewLine: true,
-						dateFormat: Container.config.defaultDateFormat
-				  })
-				: StatusFileFormatter.fromTemplate(this.getCommitFileTemplate(), this.file, {
-						relativePath: this.relativePath
-				  });
+			this._label = StatusFileFormatter.fromTemplate(this.view.config.formats.files.label, this.file, {
+				relativePath: this.relativePath,
+			});
 		}
 		return this._label;
 	}
@@ -126,63 +120,14 @@ export class CommitFileNode extends ViewRefFileNode {
 	set relativePath(value: string | undefined) {
 		this._relativePath = value;
 		this._label = undefined;
-		this._tooltip = undefined;
 	}
 
-	protected get resourceType(): string {
-		if (!this.commit.isUncommitted) {
-			return `${ResourceType.File}+committed${this._options.inFileHistory ? '+history' : ''}`;
-		}
-
-		return this.commit.isUncommittedStaged ? `${ResourceType.File}+staged` : `${ResourceType.File}+unstaged`;
-	}
-
-	private _tooltip: string | undefined;
-	get tooltip() {
-		if (this._tooltip === undefined) {
-			if (this._options.displayAsCommit) {
-				// eslint-disable-next-line no-template-curly-in-string
-				const status = StatusFileFormatter.fromTemplate('${status}${ (originalPath)}', this.file); // lgtm [js/template-syntax-in-string-literal]
-				this._tooltip = CommitFormatter.fromTemplate(
-					this.commit.isUncommitted
-						? `\${author} ${GlyphChars.Dash} \${id}\n${status}\n\${ago} (\${date})`
-						: `\${author} ${
-								GlyphChars.Dash
-						  } \${id}\n${status}\n\${ago} (\${date})\n\n\${message}${this.commit.getFormattedDiffStatus({
-								expand: true,
-								prefix: '\n\n',
-								separator: '\n'
-						  })}`,
-					this.commit,
-					{
-						dateFormat: Container.config.defaultDateFormat
-					}
-				);
-			} else {
-				this._tooltip = StatusFileFormatter.fromTemplate(
-					// eslint-disable-next-line no-template-curly-in-string
-					'${file}\n${directory}/\n\n${status}${ (originalPath)}',
-					this.file
-				);
-			}
-		}
-		return this._tooltip;
-	}
-
-	protected getCommitTemplate() {
-		return this.view.config.commitFormat;
-	}
-
-	protected getCommitDescriptionTemplate() {
-		return this.view.config.commitDescriptionFormat;
-	}
-
-	protected getCommitFileTemplate() {
-		return this.view.config.commitFileFormat;
-	}
-
-	protected getCommitFileDescriptionTemplate() {
-		return this.view.config.commitFileDescriptionFormat;
+	private get tooltip() {
+		return StatusFileFormatter.fromTemplate(
+			// eslint-disable-next-line no-template-curly-in-string
+			'${file}\n${directory}/\n\n${status}${ (originalPath)}',
+			this.file,
+		);
 	}
 
 	getCommand(): Command | undefined {
@@ -195,16 +140,17 @@ export class CommitFileNode extends ViewRefFileNode {
 
 		const commandArgs: DiffWithPreviousCommandArgs = {
 			commit: this.commit,
+			uri: GitUri.fromFile(this.file, this.commit.repoPath),
 			line: line,
 			showOptions: {
 				preserveFocus: true,
-				preview: true
-			}
+				preview: true,
+			},
 		};
 		return {
-			title: 'Compare File with Previous Revision',
+			title: 'Open Changes with Previous Revision',
 			command: Commands.DiffWithPrevious,
-			arguments: [GitUri.fromFile(this.file, this.commit.repoPath), commandArgs]
+			arguments: [undefined, commandArgs],
 		};
 	}
 }

@@ -1,14 +1,16 @@
 'use strict';
-import { Range, TextDocumentShowOptions, TextEditor, Uri } from 'vscode';
+import { TextDocumentShowOptions, TextEditor, Uri } from 'vscode';
+import { ActiveEditorCommand, command, Commands, getCommandUri } from './common';
 import { FileAnnotationType } from '../configuration';
 import { Container } from '../container';
-import { GitUri } from '../git/gitService';
+import { GitUri } from '../git/gitUri';
+import { GitActions } from './gitCommands';
 import { Logger } from '../logger';
 import { Messages } from '../messages';
-import { ActiveEditorCommand, command, Commands, findOrOpenEditor, getCommandUri } from './common';
 
 export interface OpenRevisionFileCommandArgs {
-	uri?: Uri;
+	revisionUri?: Uri;
+
 	line?: number;
 	showOptions?: TextDocumentShowOptions;
 	annotationType?: FileAnnotationType;
@@ -17,47 +19,42 @@ export interface OpenRevisionFileCommandArgs {
 @command()
 export class OpenRevisionFileCommand extends ActiveEditorCommand {
 	constructor() {
-		super(Commands.OpenRevisionFile);
+		super([Commands.OpenRevisionFile, Commands.OpenRevisionFileInDiffLeft, Commands.OpenRevisionFileInDiffRight]);
 	}
 
-	async execute(editor: TextEditor, uri?: Uri, args?: OpenRevisionFileCommandArgs) {
+	async execute(editor?: TextEditor, uri?: Uri, args?: OpenRevisionFileCommandArgs) {
+		uri = getCommandUri(uri, editor);
+		if (uri == null) return;
+
+		const gitUri = await GitUri.fromUri(uri);
+
 		args = { ...args };
-		if (args.line === undefined) {
-			args.line = editor == null ? 0 : editor.selection.active.line;
+		if (args.line == null) {
+			args.line = editor?.selection.active.line ?? 0;
 		}
 
 		try {
-			if (args.uri == null) {
-				uri = getCommandUri(uri, editor);
-				if (uri == null) return undefined;
-			} else {
-				uri = args.uri;
-			}
+			if (args.revisionUri == null) {
+				if (gitUri?.sha) {
+					const commit = await Container.git.getCommit(gitUri.repoPath!, gitUri.sha);
 
-			args.uri = await GitUri.fromUri(uri);
-			if (GitUri.is(args.uri) && args.uri.sha) {
-				const commit = await Container.git.getCommit(args.uri.repoPath!, args.uri.sha);
-
-				args.uri =
-					commit !== undefined && commit.status === 'D'
-						? GitUri.toRevisionUri(commit.previousSha!, commit.previousUri.fsPath, commit.repoPath)
-						: GitUri.toRevisionUri(args.uri);
-			}
-
-			if (args.line !== undefined && args.line !== 0) {
-				if (args.showOptions === undefined) {
-					args.showOptions = {};
+					args.revisionUri =
+						commit != null && commit.status === 'D'
+							? GitUri.toRevisionUri(commit.previousSha!, commit.previousUri.fsPath, commit.repoPath)
+							: GitUri.toRevisionUri(gitUri);
+				} else {
+					args.revisionUri = GitUri.toRevisionUri(gitUri);
 				}
-				args.showOptions.selection = new Range(args.line, 0, args.line, 0);
 			}
 
-			const e = await findOrOpenEditor(args.uri, { ...args.showOptions, rethrow: true });
-			if (args.annotationType === undefined) return e;
-
-			return Container.fileAnnotations.show(e, args.annotationType, args.line);
+			void (await GitActions.Commit.openFileAtRevision(args.revisionUri, {
+				annotationType: args.annotationType,
+				line: args.line,
+				...args.showOptions,
+			}));
 		} catch (ex) {
 			Logger.error(ex, 'OpenRevisionFileCommand');
-			return Messages.showGenericErrorMessage('Unable to open file revision');
+			void Messages.showGenericErrorMessage('Unable to open file revision');
 		}
 	}
 }

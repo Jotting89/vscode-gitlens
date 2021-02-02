@@ -1,6 +1,6 @@
 'use strict';
 import { Dates, memoize } from '../../system';
-import { GitReference } from './models';
+import { GitReference, GitTagReference } from './models';
 import { configuration, DateStyle, TagSorting } from '../../configuration';
 
 export const TagDateFormatting = {
@@ -10,33 +10,33 @@ export const TagDateFormatting = {
 	reset: () => {
 		TagDateFormatting.dateFormat = configuration.get('defaultDateFormat');
 		TagDateFormatting.dateStyle = configuration.get('defaultDateStyle');
-	}
+	},
 };
 
-export class GitTag implements GitReference {
+export class GitTag implements GitTagReference {
 	static is(tag: any): tag is GitTag {
 		return tag instanceof GitTag;
 	}
 
 	static isOfRefType(tag: GitReference | undefined) {
-		return tag !== undefined && tag.refType === 'tag';
+		return tag?.refType === 'tag';
 	}
 
-	static sort(tags: GitTag[]) {
-		const order = configuration.get('sortTagsBy');
+	static sort(tags: GitTag[], options?: { orderBy?: TagSorting }) {
+		options = { orderBy: configuration.get('sortTagsBy'), ...options };
 
-		switch (order) {
+		switch (options.orderBy) {
 			case TagSorting.DateAsc:
 				return tags.sort((a, b) => a.date.getTime() - b.date.getTime());
 			case TagSorting.DateDesc:
 				return tags.sort((a, b) => b.date.getTime() - a.date.getTime());
 			case TagSorting.NameAsc:
 				return tags.sort((a, b) =>
-					b.name.localeCompare(a.name, undefined, { numeric: true, sensitivity: 'base' })
+					b.name.localeCompare(a.name, undefined, { numeric: true, sensitivity: 'base' }),
 				);
 			default:
 				return tags.sort((a, b) =>
-					a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
+					a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }),
 				);
 		}
 	}
@@ -49,7 +49,7 @@ export class GitTag implements GitReference {
 		public readonly sha: string,
 		public readonly message: string,
 		public readonly date: Date,
-		public readonly commitDate: Date | undefined
+		public readonly commitDate: Date | undefined,
 	) {}
 
 	get formattedDate(): string {

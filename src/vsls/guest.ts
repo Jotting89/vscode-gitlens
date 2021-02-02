@@ -1,7 +1,7 @@
 'use strict';
 import { CancellationToken, Disposable, window, WorkspaceFolder } from 'vscode';
 import { LiveShare, SharedServiceProxy } from 'vsls';
-import { CommandContext, setCommandContext } from '../constants';
+import { setEnabled } from '../extension';
 import { GitCommandOptions, Repository, RepositoryChangeEvent } from '../git/git';
 import { Logger } from '../logger';
 import { debug, log } from '../system';
@@ -38,13 +38,14 @@ export class VslsGuestService implements Disposable {
 	@log()
 	private onAvailabilityChanged(available: boolean) {
 		if (available) {
-			void setCommandContext(CommandContext.Enabled, true);
+			void setEnabled(true);
+
 			return;
 		}
 
-		void setCommandContext(CommandContext.Enabled, false);
+		void setEnabled(false);
 		void window.showWarningMessage(
-			'GitLens features will be unavailable. Unable to connect to the host GitLens service. The host may have disabled GitLens guest access or may not have GitLens installed.'
+			'GitLens features will be unavailable. Unable to connect to the host GitLens service. The host may have disabled GitLens guest access or may not have GitLens installed.',
 		);
 	}
 
@@ -61,14 +62,15 @@ export class VslsGuestService implements Disposable {
 	@log()
 	async getRepositoriesInFolder(
 		folder: WorkspaceFolder,
-		onAnyRepositoryChanged: (repo: Repository, e: RepositoryChangeEvent) => void
+		onAnyRepositoryChanged: (repo: Repository, e: RepositoryChangeEvent) => void,
 	): Promise<Repository[]> {
 		const response = await this.sendRequest(RepositoriesInFolderRequestType, {
-			folderUri: folder.uri.toString(true)
+			folderUri: folder.uri.toString(true),
 		});
 
 		return response.repositories.map(
-			(r: RepositoryProxy) => new Repository(folder, r.path, r.root, onAnyRepositoryChanged, false, r.closed)
+			(r: RepositoryProxy) =>
+				new Repository(folder, r.path, r.root, onAnyRepositoryChanged, !window.state.focused, r.closed),
 		);
 	}
 
@@ -76,7 +78,7 @@ export class VslsGuestService implements Disposable {
 	private sendRequest<TRequest, TResponse>(
 		requestType: RequestType<TRequest, TResponse>,
 		request: TRequest,
-		cancellation?: CancellationToken
+		_cancellation?: CancellationToken,
 	): Promise<TResponse> {
 		return this._service.request(requestType.name, [request]);
 	}

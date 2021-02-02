@@ -1,13 +1,14 @@
 'use strict';
-import { StarredBranches, WorkspaceState } from '../../constants';
-import { Container } from '../../container';
-import { Git, GitRemote } from '../git';
-import { GitStatus } from './status';
-import { Dates, memoize } from '../../system';
-import { GitReference } from './models';
 import { BranchSorting, configuration, DateStyle } from '../../configuration';
+import { Starred, WorkspaceState } from '../../constants';
+import { Container } from '../../container';
+import { GitRemote, GitRevision } from '../git';
+import { GitBranchReference, GitReference, PullRequest, PullRequestState } from './models';
+import { GitStatus } from './status';
+import { Dates, debug, memoize } from '../../system';
 
 const whitespaceRegex = /\s/;
+const detachedHEADRegex = /^(?=.*\bHEAD\b)?(?=.*\bdetached\b).*$/;
 
 export const BranchDateFormatting = {
 	dateFormat: undefined! as string | null,
@@ -16,7 +17,7 @@ export const BranchDateFormatting = {
 	reset: () => {
 		BranchDateFormatting.dateFormat = configuration.get('defaultDateFormat');
 		BranchDateFormatting.dateStyle = configuration.get('defaultDateStyle');
-	}
+	},
 };
 
 export interface GitTrackingState {
@@ -24,50 +25,56 @@ export interface GitTrackingState {
 	behind: number;
 }
 
-export class GitBranch implements GitReference {
+export class GitBranch implements GitBranchReference {
 	static is(branch: any): branch is GitBranch {
 		return branch instanceof GitBranch;
 	}
 
 	static isOfRefType(branch: GitReference | undefined) {
-		return branch !== undefined && branch.refType === 'branch';
+		return branch?.refType === 'branch';
 	}
 
-	static sort(branches: GitBranch[]) {
-		const order = configuration.get('sortBranchesBy');
+	static sort(branches: GitBranch[], options?: { current?: boolean; orderBy?: BranchSorting }) {
+		options = { current: true, orderBy: configuration.get('sortBranchesBy'), ...options };
 
-		switch (order) {
+		switch (options.orderBy) {
 			case BranchSorting.DateAsc:
 				return branches.sort(
 					(a, b) =>
-						(a.current ? -1 : 1) - (b.current ? -1 : 1) ||
+						(options!.current ? (a.current ? -1 : 1) - (b.current ? -1 : 1) : 0) ||
 						(a.starred ? -1 : 1) - (b.starred ? -1 : 1) ||
 						(b.remote ? -1 : 1) - (a.remote ? -1 : 1) ||
-						(a.date === undefined ? -1 : a.date.getTime()) - (b.date === undefined ? -1 : b.date.getTime())
+						(a.date == null ? -1 : a.date.getTime()) - (b.date == null ? -1 : b.date.getTime()),
 				);
 			case BranchSorting.DateDesc:
 				return branches.sort(
 					(a, b) =>
-						(a.current ? -1 : 1) - (b.current ? -1 : 1) ||
+						(options!.current ? (a.current ? -1 : 1) - (b.current ? -1 : 1) : 0) ||
 						(a.starred ? -1 : 1) - (b.starred ? -1 : 1) ||
 						(b.remote ? -1 : 1) - (a.remote ? -1 : 1) ||
-						(b.date === undefined ? -1 : b.date.getTime()) - (a.date === undefined ? -1 : a.date.getTime())
+						(b.date == null ? -1 : b.date.getTime()) - (a.date == null ? -1 : a.date.getTime()),
 				);
 			case BranchSorting.NameAsc:
 				return branches.sort(
 					(a, b) =>
-						(a.current ? -1 : 1) - (b.current ? -1 : 1) ||
+						(options!.current ? (a.current ? -1 : 1) - (b.current ? -1 : 1) : 0) ||
 						(a.starred ? -1 : 1) - (b.starred ? -1 : 1) ||
+						(a.name === 'main' ? -1 : 1) - (b.name === 'main' ? -1 : 1) ||
+						(a.name === 'master' ? -1 : 1) - (b.name === 'master' ? -1 : 1) ||
+						(a.name === 'develop' ? -1 : 1) - (b.name === 'develop' ? -1 : 1) ||
 						(b.remote ? -1 : 1) - (a.remote ? -1 : 1) ||
-						b.name.localeCompare(a.name, undefined, { numeric: true, sensitivity: 'base' })
+						b.name.localeCompare(a.name, undefined, { numeric: true, sensitivity: 'base' }),
 				);
 			default:
 				return branches.sort(
 					(a, b) =>
-						(a.current ? -1 : 1) - (b.current ? -1 : 1) ||
+						(options!.current ? (a.current ? -1 : 1) - (b.current ? -1 : 1) : 0) ||
 						(a.starred ? -1 : 1) - (b.starred ? -1 : 1) ||
+						(a.name === 'main' ? -1 : 1) - (b.name === 'main' ? -1 : 1) ||
+						(a.name === 'master' ? -1 : 1) - (b.name === 'master' ? -1 : 1) ||
+						(a.name === 'develop' ? -1 : 1) - (b.name === 'develop' ? -1 : 1) ||
 						(b.remote ? -1 : 1) - (a.remote ? -1 : 1) ||
-						a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
+						a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }),
 				);
 		}
 	}
@@ -88,7 +95,8 @@ export class GitBranch implements GitReference {
 		tracking?: string,
 		ahead: number = 0,
 		behind: number = 0,
-		detached: boolean = false
+		detached: boolean = false,
+		public readonly rebasing: boolean = false,
 	) {
 		this.id = `${repoPath}|${remote ? 'remotes/' : 'heads/'}${name}`;
 
@@ -100,7 +108,7 @@ export class GitBranch implements GitReference {
 		this.tracking = tracking == null || tracking.length === 0 ? undefined : tracking;
 		this.state = {
 			ahead: ahead,
-			behind: behind
+			behind: behind,
 		};
 	}
 
@@ -116,38 +124,56 @@ export class GitBranch implements GitReference {
 
 	@memoize()
 	private get dateFormatter(): Dates.DateFormatter | undefined {
-		return this.date === undefined ? undefined : Dates.getFormatter(this.date);
+		return this.date == null ? undefined : Dates.getFormatter(this.date);
 	}
 
 	@memoize<GitBranch['formatDate']>(format => (format == null ? 'MMMM Do, YYYY h:mma' : format))
-	formatDate(format?: string | null) {
+	formatDate(format?: string | null): string {
 		if (format == null) {
 			format = 'MMMM Do, YYYY h:mma';
 		}
 
-		return this.dateFormatter === undefined ? '' : this.dateFormatter.format(format);
+		return this.dateFormatter?.format(format) ?? '';
 	}
 
-	formatDateFromNow() {
-		return this.dateFormatter === undefined ? '' : this.dateFormatter.fromNow();
+	formatDateFromNow(): string {
+		return this.dateFormatter?.fromNow() ?? '';
+	}
+
+	@debug()
+	async getAssociatedPullRequest(options?: {
+		avatarSize?: number;
+		include?: PullRequestState[];
+		limit?: number;
+		timeout?: number;
+	}): Promise<PullRequest | undefined> {
+		const remote = await this.getRemote();
+		if (remote == null) return undefined;
+
+		return Container.git.getPullRequestForBranch(this.getNameWithoutRemote(), remote, options);
 	}
 
 	@memoize()
 	getBasename(): string {
-		const name = this.getName();
+		const name = this.getNameWithoutRemote();
 		const index = name.lastIndexOf('/');
 		return index !== -1 ? name.substring(index + 1) : name;
 	}
 
 	@memoize()
-	getName(): string {
+	getNameWithoutRemote(): string {
 		return this.remote ? this.name.substring(this.name.indexOf('/') + 1) : this.name;
+	}
+
+	@memoize()
+	getTrackingWithoutRemote(): string | undefined {
+		return this.tracking?.substring(this.tracking.indexOf('/') + 1);
 	}
 
 	@memoize()
 	async getRemote(): Promise<GitRemote | undefined> {
 		const remoteName = this.getRemoteName();
-		if (remoteName === undefined) return undefined;
+		if (remoteName == null) return undefined;
 
 		const remotes = await Container.git.getRemotes(this.repoPath);
 		if (remotes.length === 0) return undefined;
@@ -158,7 +184,7 @@ export class GitBranch implements GitReference {
 	@memoize()
 	getRemoteName(): string | undefined {
 		if (this.remote) return GitBranch.getRemote(this.name);
-		if (this.tracking !== undefined) return GitBranch.getRemote(this.tracking);
+		if (this.tracking != null) return GitBranch.getRemote(this.tracking);
 
 		return undefined;
 	}
@@ -166,6 +192,7 @@ export class GitBranch implements GitReference {
 	getTrackingStatus(options?: {
 		empty?: string;
 		expand?: boolean;
+		icons?: boolean;
 		prefix?: string;
 		separator?: string;
 		suffix?: string;
@@ -174,45 +201,33 @@ export class GitBranch implements GitReference {
 	}
 
 	get starred() {
-		const starred = Container.context.workspaceState.get<StarredBranches>(WorkspaceState.StarredBranches);
+		const starred = Container.context.workspaceState.get<Starred>(WorkspaceState.StarredBranches);
 		return starred !== undefined && starred[this.id] === true;
 	}
 
-	star() {
-		return this.updateStarred(true);
+	async star() {
+		await (await Container.git.getRepository(this.repoPath))?.star(this);
 	}
 
-	unstar() {
-		return this.updateStarred(false);
-	}
-
-	private async updateStarred(star: boolean) {
-		let starred = Container.context.workspaceState.get<StarredBranches>(WorkspaceState.StarredBranches);
-		if (starred === undefined) {
-			starred = Object.create(null);
-		}
-
-		if (star) {
-			starred![this.id] = true;
-		} else {
-			// eslint-disable-next-line @typescript-eslint/no-unused-vars
-			const { [this.id]: _, ...rest } = starred!;
-			starred = rest;
-		}
-		await Container.context.workspaceState.update(WorkspaceState.StarredBranches, starred);
+	async unstar() {
+		await (await Container.git.getRepository(this.repoPath))?.unstar(this);
 	}
 
 	static formatDetached(sha: string): string {
-		return `(${Git.shortenSha(sha)}...)`;
+		return `(${GitRevision.shorten(sha)}...)`;
 	}
 
-	static getRemote(branch: string): string {
-		return branch.substring(0, branch.indexOf('/'));
+	static getNameWithoutRemote(name: string): string {
+		return name.substring(name.indexOf('/') + 1);
+	}
+
+	static getRemote(name: string): string {
+		return name.substring(0, name.indexOf('/'));
 	}
 
 	static isDetached(name: string): boolean {
 		// If there is whitespace in the name assume this is not a valid branch name
 		// Deals with detached HEAD states
-		return whitespaceRegex.test(name) || name.includes('(detached)');
+		return whitespaceRegex.test(name) || detachedHEADRegex.test(name);
 	}
 }

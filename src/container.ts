@@ -1,27 +1,36 @@
 'use strict';
-import { commands, ConfigurationChangeEvent, Disposable, ExtensionContext, Uri } from 'vscode';
+import { commands, ConfigurationChangeEvent, ConfigurationScope, ExtensionContext } from 'vscode';
 import { Autolinks } from './annotations/autolinks';
 import { FileAnnotationController } from './annotations/fileAnnotationController';
 import { LineAnnotationController } from './annotations/lineAnnotationController';
+import { ActionRunners } from './api/actionRunners';
+import { resetAvatarCache } from './avatars';
 import { GitCodeLensController } from './codelens/codeLensController';
-import { Commands, ToggleFileBlameCommandArgs } from './commands';
+import { Commands, ToggleFileAnnotationCommandArgs } from './commands';
 import { AnnotationsToggleMode, Config, configuration, ConfigurationWillChangeEvent } from './configuration';
 import { GitFileSystemProvider } from './git/fsProvider';
 import { GitService } from './git/gitService';
-import { clearAvatarCache } from './avatars';
 import { LineHoverController } from './hovers/lineHoverController';
 import { Keyboard } from './keyboard';
 import { Logger } from './logger';
 import { StatusBarController } from './statusbar/statusBarController';
+import { memoize } from './system/decorators/memoize';
+import { GitTerminalLinkProvider } from './terminal/linkProvider';
 import { GitDocumentTracker } from './trackers/gitDocumentTracker';
 import { GitLineTracker } from './trackers/gitLineTracker';
-import { CompareView } from './views/compareView';
+import { BranchesView } from './views/branchesView';
+import { CommitsView } from './views/commitsView';
+import { ContributorsView } from './views/contributorsView';
 import { FileHistoryView } from './views/fileHistoryView';
 import { LineHistoryView } from './views/lineHistoryView';
+import { RemotesView } from './views/remotesView';
 import { RepositoriesView } from './views/repositoriesView';
-import { SearchView } from './views/searchView';
+import { SearchAndCompareView } from './views/searchAndCompareView';
+import { StashesView } from './views/stashesView';
+import { TagsView } from './views/tagsView';
 import { ViewCommands } from './views/viewCommands';
 import { VslsController } from './vsls/vsls';
+import { RebaseEditorProvider } from './webviews/rebaseEditor';
 import { SettingsWebview } from './webviews/settingsWebview';
 import { WelcomeWebview } from './webviews/welcomeWebview';
 
@@ -31,10 +40,14 @@ export class Container {
 		| ((e: ConfigurationChangeEvent) => ConfigurationChangeEvent)
 		| undefined;
 
-	static initialize(context: ExtensionContext, config: Config) {
+	private static _terminalLinks: GitTerminalLinkProvider | undefined;
+
+	static initialize(extensionId: string, context: ExtensionContext, config: Config) {
+		this._extensionId = extensionId;
 		this._context = context;
 		this._config = Container.applyMode(config);
 
+		context.subscriptions.push((this._actionRunners = new ActionRunners()));
 		context.subscriptions.push((this._lineTracker = new GitLineTracker()));
 		context.subscriptions.push((this._tracker = new GitDocumentTracker()));
 		context.subscriptions.push((this._vsls = new VslsController()));
@@ -53,70 +66,33 @@ export class Container {
 		context.subscriptions.push((this._settingsWebview = new SettingsWebview()));
 		context.subscriptions.push((this._welcomeWebview = new WelcomeWebview()));
 
-		if (config.views.compare.enabled) {
-			context.subscriptions.push((this._compareView = new CompareView()));
-		} else {
-			let disposable: Disposable;
-			// eslint-disable-next-line prefer-const
-			disposable = configuration.onDidChange(e => {
-				if (configuration.changed(e, 'views', 'compare', 'enabled')) {
-					disposable.dispose();
-					context.subscriptions.push((this._compareView = new CompareView()));
-				}
-			});
+		context.subscriptions.push((this._repositoriesView = new RepositoriesView()));
+		context.subscriptions.push((this._commitsView = new CommitsView()));
+		context.subscriptions.push((this._fileHistoryView = new FileHistoryView()));
+		context.subscriptions.push((this._lineHistoryView = new LineHistoryView()));
+		context.subscriptions.push((this._branchesView = new BranchesView()));
+		context.subscriptions.push((this._remotesView = new RemotesView()));
+		context.subscriptions.push((this._stashesView = new StashesView()));
+		context.subscriptions.push((this._tagsView = new TagsView()));
+		context.subscriptions.push((this._contributorsView = new ContributorsView()));
+		context.subscriptions.push((this._searchAndCompareView = new SearchAndCompareView()));
+
+		context.subscriptions.push((this._rebaseEditor = new RebaseEditorProvider()));
+
+		if (config.terminalLinks.enabled) {
+			context.subscriptions.push((this._terminalLinks = new GitTerminalLinkProvider()));
 		}
 
-		if (config.views.fileHistory.enabled) {
-			context.subscriptions.push((this._fileHistoryView = new FileHistoryView()));
-		} else {
-			let disposable: Disposable;
-			// eslint-disable-next-line prefer-const
-			disposable = configuration.onDidChange(e => {
-				if (configuration.changed(e, 'views', 'fileHistory', 'enabled')) {
-					disposable.dispose();
-					context.subscriptions.push((this._fileHistoryView = new FileHistoryView()));
-				}
-			});
-		}
+		context.subscriptions.push(
+			configuration.onDidChange(e => {
+				if (!configuration.changed(e, 'terminalLinks', 'enabled')) return;
 
-		if (config.views.lineHistory.enabled) {
-			context.subscriptions.push((this._lineHistoryView = new LineHistoryView()));
-		} else {
-			let disposable: Disposable;
-			// eslint-disable-next-line prefer-const
-			disposable = configuration.onDidChange(e => {
-				if (configuration.changed(e, 'views', 'lineHistory', 'enabled')) {
-					disposable.dispose();
-					context.subscriptions.push((this._lineHistoryView = new LineHistoryView()));
+				this._terminalLinks?.dispose();
+				if (Container.config.terminalLinks.enabled) {
+					context.subscriptions.push((this._terminalLinks = new GitTerminalLinkProvider()));
 				}
-			});
-		}
-
-		if (config.views.repositories.enabled) {
-			context.subscriptions.push((this._repositoriesView = new RepositoriesView()));
-		} else {
-			let disposable: Disposable;
-			// eslint-disable-next-line prefer-const
-			disposable = configuration.onDidChange(e => {
-				if (configuration.changed(e, 'views', 'repositories', 'enabled')) {
-					disposable.dispose();
-					context.subscriptions.push((this._repositoriesView = new RepositoriesView()));
-				}
-			});
-		}
-
-		if (config.views.search.enabled) {
-			context.subscriptions.push((this._searchView = new SearchView()));
-		} else {
-			let disposable: Disposable;
-			// eslint-disable-next-line prefer-const
-			disposable = configuration.onDidChange(e => {
-				if (configuration.changed(e, 'views', 'search', 'enabled')) {
-					disposable.dispose();
-					context.subscriptions.push((this._searchView = new SearchView()));
-				}
-			});
-		}
+			}),
+		);
 
 		context.subscriptions.push(new GitFileSystemProvider());
 
@@ -131,20 +107,29 @@ export class Container {
 		}
 
 		if (configuration.changed(e.change, 'defaultGravatarsStyle')) {
-			clearAvatarCache();
+			resetAvatarCache('fallback');
 		}
 
 		if (configuration.changed(e.change, 'mode') || configuration.changed(e.change, 'modes')) {
-			if (this._applyModeConfigurationTransformBound === undefined) {
+			if (this._applyModeConfigurationTransformBound == null) {
 				this._applyModeConfigurationTransformBound = this.applyModeConfigurationTransform.bind(this);
 			}
 			e.transform = this._applyModeConfigurationTransformBound;
 		}
 	}
 
+	private static _actionRunners: ActionRunners;
+	static get actionRunners() {
+		if (this._actionRunners == null) {
+			this._context.subscriptions.push((this._actionRunners = new ActionRunners()));
+		}
+
+		return this._actionRunners;
+	}
+
 	private static _autolinks: Autolinks;
 	static get autolinks() {
-		if (this._autolinks === undefined) {
+		if (this._autolinks == null) {
 			this._context.subscriptions.push((this._autolinks = new Autolinks()));
 		}
 
@@ -156,18 +141,27 @@ export class Container {
 		return this._codeLensController;
 	}
 
-	private static _compareView: CompareView | undefined;
-	static get compareView() {
-		if (this._compareView === undefined) {
-			this._context.subscriptions.push((this._compareView = new CompareView()));
+	private static _branchesView: BranchesView | undefined;
+	static get branchesView() {
+		if (this._branchesView == null) {
+			this._context.subscriptions.push((this._branchesView = new BranchesView()));
 		}
 
-		return this._compareView;
+		return this._branchesView;
+	}
+
+	private static _commitsView: CommitsView | undefined;
+	static get commitsView() {
+		if (this._commitsView == null) {
+			this._context.subscriptions.push((this._commitsView = new CommitsView()));
+		}
+
+		return this._commitsView;
 	}
 
 	private static _config: Config | undefined;
 	static get config() {
-		if (this._config === undefined) {
+		if (this._config == null) {
 			this._config = Container.applyMode(configuration.get());
 		}
 		return this._config;
@@ -178,6 +172,20 @@ export class Container {
 		return this._context;
 	}
 
+	private static _contributorsView: ContributorsView | undefined;
+	static get contributorsView() {
+		if (this._contributorsView == null) {
+			this._context.subscriptions.push((this._contributorsView = new ContributorsView()));
+		}
+
+		return this._contributorsView;
+	}
+
+	private static _extensionId: string;
+	static get extensionId() {
+		return this._extensionId;
+	}
+
 	private static _fileAnnotationController: FileAnnotationController;
 	static get fileAnnotations() {
 		return this._fileAnnotationController;
@@ -185,7 +193,7 @@ export class Container {
 
 	private static _fileHistoryView: FileHistoryView | undefined;
 	static get fileHistoryView() {
-		if (this._fileHistoryView === undefined) {
+		if (this._fileHistoryView == null) {
 			this._context.subscriptions.push((this._fileHistoryView = new FileHistoryView()));
 		}
 
@@ -195,6 +203,29 @@ export class Container {
 	private static _git: GitService;
 	static get git() {
 		return this._git;
+	}
+
+	private static _github: Promise<import('./github/github').GitHubApi | undefined> | undefined;
+	static get github() {
+		if (this._github == null) {
+			this._github = this._loadGitHubApi();
+		}
+
+		return this._github;
+	}
+
+	private static async _loadGitHubApi() {
+		try {
+			return new (await import(/* webpackChunkName: "github" */ './github/github')).GitHubApi();
+		} catch (ex) {
+			Logger.error(ex);
+			return undefined;
+		}
+	}
+
+	@memoize()
+	static get insiders() {
+		return this._extensionId.endsWith('-insiders');
 	}
 
 	private static _keyboard: Keyboard;
@@ -209,7 +240,7 @@ export class Container {
 
 	private static _lineHistoryView: LineHistoryView | undefined;
 	static get lineHistoryView() {
-		if (this._lineHistoryView === undefined) {
+		if (this._lineHistoryView == null) {
 			this._context.subscriptions.push((this._lineHistoryView = new LineHistoryView()));
 		}
 
@@ -226,22 +257,40 @@ export class Container {
 		return this._lineTracker;
 	}
 
+	private static _rebaseEditor: RebaseEditorProvider | undefined;
+	static get rebaseEditor() {
+		if (this._rebaseEditor == null) {
+			this._context.subscriptions.push((this._rebaseEditor = new RebaseEditorProvider()));
+		}
+
+		return this._rebaseEditor;
+	}
+
+	private static _remotesView: RemotesView | undefined;
+	static get remotesView() {
+		if (this._remotesView == null) {
+			this._context.subscriptions.push((this._remotesView = new RemotesView()));
+		}
+
+		return this._remotesView;
+	}
+
 	private static _repositoriesView: RepositoriesView | undefined;
 	static get repositoriesView(): RepositoriesView {
-		if (this._repositoriesView === undefined) {
+		if (this._repositoriesView == null) {
 			this._context.subscriptions.push((this._repositoriesView = new RepositoriesView()));
 		}
 
 		return this._repositoriesView;
 	}
 
-	private static _searchView: SearchView | undefined;
-	static get searchView() {
-		if (this._searchView === undefined) {
-			this._context.subscriptions.push((this._searchView = new SearchView()));
+	private static _searchAndCompareView: SearchAndCompareView | undefined;
+	static get searchAndCompareView() {
+		if (this._searchAndCompareView == null) {
+			this._context.subscriptions.push((this._searchAndCompareView = new SearchAndCompareView()));
 		}
 
-		return this._searchView;
+		return this._searchAndCompareView;
 	}
 
 	private static _settingsWebview: SettingsWebview;
@@ -249,9 +298,27 @@ export class Container {
 		return this._settingsWebview;
 	}
 
+	private static _stashesView: StashesView | undefined;
+	static get stashesView() {
+		if (this._stashesView == null) {
+			this._context.subscriptions.push((this._stashesView = new StashesView()));
+		}
+
+		return this._stashesView;
+	}
+
 	private static _statusBarController: StatusBarController;
 	static get statusBar() {
 		return this._statusBarController;
+	}
+
+	private static _tagsView: TagsView | undefined;
+	static get tagsView() {
+		if (this._tagsView == null) {
+			this._context.subscriptions.push((this._tagsView = new TagsView()));
+		}
+
+		return this._tagsView;
 	}
 
 	private static _tracker: GitDocumentTracker;
@@ -261,7 +328,7 @@ export class Container {
 
 	private static _viewCommands: ViewCommands | undefined;
 	static get viewCommands() {
-		if (this._viewCommands === undefined) {
+		if (this._viewCommands == null) {
 			this._viewCommands = new ViewCommands();
 		}
 		return this._viewCommands;
@@ -290,19 +357,19 @@ export class Container {
 					config.blame.toggleMode = AnnotationsToggleMode.Window;
 					command = Commands.ToggleFileBlame;
 					break;
+				case 'changes':
+					config.changes.toggleMode = AnnotationsToggleMode.Window;
+					command = Commands.ToggleFileChanges;
+					break;
 				case 'heatmap':
 					config.heatmap.toggleMode = AnnotationsToggleMode.Window;
 					command = Commands.ToggleFileHeatmap;
 					break;
-				case 'recentChanges':
-					config.recentChanges.toggleMode = AnnotationsToggleMode.Window;
-					command = Commands.ToggleFileRecentChanges;
-					break;
 			}
 
-			if (command !== undefined) {
-				const commandArgs: ToggleFileBlameCommandArgs = {
-					on: true
+			if (command != null) {
+				const commandArgs: ToggleFileAnnotationCommandArgs = {
+					on: true,
 				};
 				// Make sure to delay the execution by a bit so that the configuration changes get propegated first
 				setTimeout(() => commands.executeCommand(command!, commandArgs), 50);
@@ -325,55 +392,29 @@ export class Container {
 			config.statusBar.enabled = mode.statusBar;
 		}
 
-		if (mode.views != null) {
-			config.views.compare.enabled = mode.views;
-		}
-		if (mode.views != null) {
-			config.views.fileHistory.enabled = mode.views;
-		}
-		if (mode.views != null) {
-			config.views.lineHistory.enabled = mode.views;
-		}
-		if (mode.views != null) {
-			config.views.repositories.enabled = mode.views;
-		}
-		if (mode.views != null) {
-			config.views.search.enabled = mode.views;
-		}
-
 		return config;
 	}
 
 	private static applyModeConfigurationTransform(e: ConfigurationChangeEvent): ConfigurationChangeEvent {
-		if (this._configsAffectedByMode === undefined) {
+		if (this._configsAffectedByMode == null) {
 			this._configsAffectedByMode = [
 				`gitlens.${configuration.name('mode')}`,
 				`gitlens.${configuration.name('modes')}`,
 				`gitlens.${configuration.name('blame', 'toggleMode')}`,
+				`gitlens.${configuration.name('changes', 'toggleMode')}`,
 				`gitlens.${configuration.name('codeLens')}`,
 				`gitlens.${configuration.name('currentLine')}`,
 				`gitlens.${configuration.name('heatmap', 'toggleMode')}`,
 				`gitlens.${configuration.name('hovers')}`,
-				`gitlens.${configuration.name('recentChanges', 'toggleMode')}`,
 				`gitlens.${configuration.name('statusBar')}`,
-				`gitlens.${configuration.name('views', 'compare')}`,
-				`gitlens.${configuration.name('views', 'fileHistory')}`,
-				`gitlens.${configuration.name('views', 'lineHistory')}`,
-				`gitlens.${configuration.name('views', 'repositories')}`,
-				`gitlens.${configuration.name('views', 'search')}`
 			];
 		}
 
 		const original = e.affectsConfiguration;
 		return {
 			...e,
-			affectsConfiguration: (section: string, resource?: Uri) => {
-				if (this._configsAffectedByMode && this._configsAffectedByMode.some(n => section.startsWith(n))) {
-					return true;
-				}
-
-				return original(section, resource);
-			}
+			affectsConfiguration: (section: string, scope?: ConfigurationScope) =>
+				this._configsAffectedByMode?.some(n => section.startsWith(n)) ? true : original(section, scope),
 		};
 	}
 }

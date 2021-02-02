@@ -8,24 +8,23 @@ import {
 	TextEditorDecorationType,
 	TextEditorSelectionChangeEvent,
 	Uri,
-	window
+	window,
 } from 'vscode';
-import { TextDocumentComparer } from '../comparers';
 import { FileAnnotationType } from '../configuration';
-import { CommandContext, setCommandContext } from '../constants';
-import { Functions } from '../system';
+import { ContextKeys, setContext } from '../constants';
+import { Logger } from '../logger';
 import { GitDocumentState, TrackedDocument } from '../trackers/gitDocumentTracker';
 
 export enum AnnotationStatus {
 	Computing = 'computing',
-	Computed = 'computed'
+	Computed = 'computed',
 }
 
 export type TextEditorCorrelationKey = string;
 
 export abstract class AnnotationProviderBase implements Disposable {
 	static getCorrelationKey(editor: TextEditor | undefined): TextEditorCorrelationKey {
-		return editor !== undefined ? (editor as any).id : '';
+		return editor != null ? (editor as any).id : '';
 	}
 
 	annotationType: FileAnnotationType | undefined;
@@ -33,104 +32,55 @@ export abstract class AnnotationProviderBase implements Disposable {
 	document: TextDocument;
 	status: AnnotationStatus | undefined;
 
-	protected decorations: DecorationOptions[] | undefined;
+	private decorations:
+		| { decorationType: TextEditorDecorationType; rangesOrOptions: Range[] | DecorationOptions[] }[]
+		| undefined;
 	protected disposable: Disposable;
 
-	constructor(
-		public editor: TextEditor,
-		protected readonly trackedDocument: TrackedDocument<GitDocumentState>,
-		protected decoration: TextEditorDecorationType,
-		protected highlightDecoration: TextEditorDecorationType | undefined
-	) {
+	constructor(public editor: TextEditor, protected readonly trackedDocument: TrackedDocument<GitDocumentState>) {
 		this.correlationKey = AnnotationProviderBase.getCorrelationKey(this.editor);
 		this.document = this.editor.document;
 
 		this.disposable = Disposable.from(
-			window.onDidChangeTextEditorSelection(this.onTextEditorSelectionChanged, this)
+			window.onDidChangeTextEditorSelection(this.onTextEditorSelectionChanged, this),
 		);
 	}
 
 	dispose() {
 		this.clear();
 
-		this.disposable && this.disposable.dispose();
+		this.disposable.dispose();
 	}
 
 	private onTextEditorSelectionChanged(e: TextEditorSelectionChangeEvent) {
-		if (!TextDocumentComparer.equals(this.document, e.textEditor && e.textEditor.document)) return;
+		if (this.document !== e.textEditor.document) return;
 
-		this.selection(e.selections[0].active.line);
+		void this.selection(e.selections[0].active.line);
 	}
 
 	get editorId(): string {
-		if (this.editor === undefined || this.editor.document === undefined) return '';
+		if (this.editor?.document == null) return '';
 		return (this.editor as any).id;
 	}
 
 	get editorUri(): Uri | undefined {
-		if (this.editor === undefined || this.editor.document === undefined) return undefined;
+		if (this.editor?.document == null) return undefined;
 		return this.editor.document.uri;
 	}
 
-	protected additionalDecorations: { decoration: TextEditorDecorationType; ranges: Range[] }[] | undefined;
-
 	clear() {
 		this.status = undefined;
-		if (this.editor === undefined) return;
+		if (this.editor == null) return;
 
-		if (this.decoration !== undefined) {
-			try {
-				this.editor.setDecorations(this.decoration, []);
-			} catch {}
-		}
-
-		if (this.additionalDecorations !== undefined && this.additionalDecorations.length > 0) {
-			for (const d of this.additionalDecorations) {
+		if (this.decorations?.length) {
+			for (const d of this.decorations) {
 				try {
-					this.editor.setDecorations(d.decoration, []);
+					this.editor.setDecorations(d.decorationType, []);
 				} catch {}
 			}
 
-			this.additionalDecorations = undefined;
+			this.decorations = undefined;
 		}
-
-		if (this.highlightDecoration !== undefined) {
-			try {
-				this.editor.setDecorations(this.highlightDecoration, []);
-			} catch {}
-		}
-	}
-
-	private _resetDebounced:
-		| ((changes?: {
-				decoration: TextEditorDecorationType;
-				highlightDecoration: TextEditorDecorationType | undefined;
-		  }) => void)
-		| undefined;
-
-	reset(changes?: {
-		decoration: TextEditorDecorationType;
-		highlightDecoration: TextEditorDecorationType | undefined;
-	}) {
-		if (this._resetDebounced === undefined) {
-			this._resetDebounced = Functions.debounce(this.onReset.bind(this), 250);
-		}
-
-		this._resetDebounced(changes);
-	}
-
-	async onReset(changes?: {
-		decoration: TextEditorDecorationType;
-		highlightDecoration: TextEditorDecorationType | undefined;
-	}) {
-		if (changes !== undefined) {
-			this.clear();
-
-			this.decoration = changes.decoration;
-			this.highlightDecoration = changes.highlightDecoration;
-		}
-
-		await this.provideAnnotation(this.editor === undefined ? undefined : this.editor.selection.active.line);
 	}
 
 	async restore(editor: TextEditor) {
@@ -140,41 +90,58 @@ export abstract class AnnotationProviderBase implements Disposable {
 
 		this.status = AnnotationStatus.Computing;
 		if (editor === window.activeTextEditor) {
-			await setCommandContext(CommandContext.AnnotationStatus, this.status);
+			await setContext(ContextKeys.AnnotationStatus, this.status);
 		}
 
 		this.editor = editor;
 		this.correlationKey = AnnotationProviderBase.getCorrelationKey(editor);
 		this.document = editor.document;
 
-		if (this.decorations !== undefined && this.decorations.length) {
-			this.editor.setDecorations(this.decoration, this.decorations);
-
-			if (this.additionalDecorations !== undefined && this.additionalDecorations.length) {
-				for (const d of this.additionalDecorations) {
-					this.editor.setDecorations(d.decoration, d.ranges);
-				}
+		if (this.decorations?.length) {
+			for (const d of this.decorations) {
+				this.editor.setDecorations(d.decorationType, d.rangesOrOptions);
 			}
 		}
 
 		this.status = AnnotationStatus.Computed;
 		if (editor === window.activeTextEditor) {
-			await setCommandContext(CommandContext.AnnotationStatus, this.status);
+			await setContext(ContextKeys.AnnotationStatus, this.status);
 		}
 	}
 
 	async provideAnnotation(shaOrLine?: string | number): Promise<boolean> {
 		this.status = AnnotationStatus.Computing;
-		if (await this.onProvideAnnotation(shaOrLine)) {
-			this.status = AnnotationStatus.Computed;
-			return true;
+		try {
+			if (await this.onProvideAnnotation(shaOrLine)) {
+				this.status = AnnotationStatus.Computed;
+				return true;
+			}
+		} catch (ex) {
+			Logger.error(ex);
 		}
 
 		this.status = undefined;
 		return false;
 	}
 
-	abstract onProvideAnnotation(shaOrLine?: string | number): Promise<boolean>;
+	protected abstract onProvideAnnotation(shaOrLine?: string | number): Promise<boolean>;
+
 	abstract selection(shaOrLine?: string | number): Promise<void>;
+
+	protected setDecorations(
+		decorations: { decorationType: TextEditorDecorationType; rangesOrOptions: Range[] | DecorationOptions[] }[],
+	) {
+		if (this.decorations?.length) {
+			this.clear();
+		}
+
+		this.decorations = decorations;
+		if (this.decorations?.length) {
+			for (const d of this.decorations) {
+				this.editor.setDecorations(d.decorationType, d.rangesOrOptions);
+			}
+		}
+	}
+
 	abstract validate(): Promise<boolean>;
 }

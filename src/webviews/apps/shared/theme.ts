@@ -17,12 +17,12 @@ export function initializeAndWatchThemeColors() {
 		} else {
 			bodyStyle.setProperty(
 				'--font-family',
-				computedStyle.getPropertyValue('--vscode-editor-font-family').trim()
+				computedStyle.getPropertyValue('--vscode-editor-font-family').trim(),
 			);
 			bodyStyle.setProperty('--font-size', computedStyle.getPropertyValue('--vscode-editor-font-size').trim());
 			bodyStyle.setProperty(
 				'--font-weight',
-				computedStyle.getPropertyValue('--vscode-editor-font-weight').trim()
+				computedStyle.getPropertyValue('--vscode-editor-font-weight').trim(),
 			);
 		}
 
@@ -42,6 +42,16 @@ export function initializeAndWatchThemeColors() {
 		color = computedStyle.getPropertyValue('--vscode-button-background').trim();
 		bodyStyle.setProperty('--color-button-background', color);
 		bodyStyle.setProperty('--color-button-background--darken-30', darken(color, 30));
+
+		color = computedStyle.getPropertyValue('--vscode-button-secondaryBackground').trim();
+		bodyStyle.setProperty('--color-button-secondary-background', color);
+		bodyStyle.setProperty('--color-button-secondary-background--darken-30', darken(color, 30));
+
+		color = computedStyle.getPropertyValue('--vscode-button-background').trim();
+		bodyStyle.setProperty('--color-highlight', color);
+		bodyStyle.setProperty('--color-highlight--75', opacity(color, 75));
+		bodyStyle.setProperty('--color-highlight--50', opacity(color, 50));
+		bodyStyle.setProperty('--color-highlight--25', opacity(color, 25));
 
 		color = computedStyle.getPropertyValue('--vscode-button-foreground').trim();
 		bodyStyle.setProperty('--color-button-foreground', color);

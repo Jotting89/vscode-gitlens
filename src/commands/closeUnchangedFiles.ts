@@ -1,12 +1,12 @@
 'use strict';
 import { commands, TextEditor, Uri, window } from 'vscode';
+import { Command, command, Commands, getRepoPathOrPrompt } from './common';
 import { TextEditorComparer, UriComparer } from '../comparers';
-import { BuiltInCommands, GlyphChars } from '../constants';
+import { BuiltInCommands } from '../constants';
 import { Container } from '../container';
 import { Logger } from '../logger';
 import { Messages } from '../messages';
 import { Functions } from '../system';
-import { Command, command, Commands, getRepoPathOrPrompt } from './common';
 
 export interface CloseUnchangedFilesCommandArgs {
 	uris?: Uri[];
@@ -24,25 +24,28 @@ export class CloseUnchangedFilesCommand extends Command {
 		args = { ...args };
 
 		try {
-			if (args.uris === undefined) {
-				const repoPath = await getRepoPathOrPrompt(
-					`Close all files except those changed in which repository${GlyphChars.Ellipsis}`
-				);
-				if (!repoPath) return undefined;
+			if (args.uris == null) {
+				const repoPath = await getRepoPathOrPrompt('Close All Unchanged Files');
+				if (!repoPath) return;
 
 				const status = await Container.git.getStatusForRepo(repoPath);
-				if (status === undefined) return window.showWarningMessage('Unable to close unchanged files');
+				if (status == null) {
+					void window.showWarningMessage('Unable to close unchanged files');
+
+					return;
+				}
 
 				args.uris = status.files.map(f => f.uri);
 			}
 
-			if (args.uris.length === 0) return commands.executeCommand(BuiltInCommands.CloseAllEditors);
+			if (args.uris.length === 0) {
+				void commands.executeCommand(BuiltInCommands.CloseAllEditors);
+
+				return;
+			}
 
 			const disposable = window.onDidChangeActiveTextEditor(
-				Functions.debounce(
-					(e: TextEditor | undefined) => this._onEditorChangedFn && this._onEditorChangedFn(e),
-					50
-				)
+				Functions.debounce((e: TextEditor | undefined) => this._onEditorChangedFn?.(e), 50),
 			);
 
 			let editor = window.activeTextEditor;
@@ -83,12 +86,9 @@ export class CloseUnchangedFilesCommand extends Command {
 				for (let i = 0; i <= count; i++) {
 					if (
 						editor == null ||
-						(editor.document !== undefined &&
-							(editor.document.isDirty ||
-								// eslint-disable-next-line no-loop-func
-								args.uris.some(uri =>
-									UriComparer.equals(uri, editor!.document && editor!.document.uri)
-								)))
+						editor.document.isDirty ||
+						// eslint-disable-next-line no-loop-func
+						args.uris.some(uri => UriComparer.equals(uri, editor?.document.uri))
 					) {
 						editor = await this.nextEditor();
 					} else {
@@ -98,11 +98,9 @@ export class CloseUnchangedFilesCommand extends Command {
 			}
 
 			disposable.dispose();
-
-			return undefined;
 		} catch (ex) {
 			Logger.error(ex, 'CloseUnchangedFilesCommand');
-			return Messages.showGenericErrorMessage('Unable to close all unchanged files');
+			void Messages.showGenericErrorMessage('Unable to close all unchanged files');
 		}
 	}
 
@@ -131,11 +129,11 @@ export class CloseUnchangedFilesCommand extends Command {
 	}
 
 	private waitForEditorChange(timeout: number = 500): Promise<TextEditor | undefined> {
-		return new Promise<TextEditor>((resolve, reject) => {
+		return new Promise<TextEditor | undefined>(resolve => {
 			let timer: NodeJS.Timer | undefined;
 
 			this._onEditorChangedFn = (editor: TextEditor | undefined) => {
-				if (timer) {
+				if (timer != null) {
 					clearTimeout(timer);
 					timer = undefined;
 

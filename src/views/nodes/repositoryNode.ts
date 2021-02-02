@@ -1,17 +1,19 @@
 'use strict';
-import { Disposable, TreeItem, TreeItemCollapsibleState } from 'vscode';
+import { Disposable, MarkdownString, TreeItem, TreeItemCollapsibleState } from 'vscode';
 import { GlyphChars } from '../../constants';
 import { Container } from '../../container';
 import {
 	GitBranch,
+	GitRemote,
 	GitStatus,
-	GitUri,
 	Repository,
 	RepositoryChange,
+	RepositoryChangeComparisonMode,
 	RepositoryChangeEvent,
-	RepositoryFileSystemChangeEvent
-} from '../../git/gitService';
-import { Dates, debug, gate, log, Strings } from '../../system';
+	RepositoryFileSystemChangeEvent,
+} from '../../git/git';
+import { GitUri } from '../../git/gitUri';
+import { Arrays, debug, Functions, gate, log, Strings } from '../../system';
 import { RepositoriesView } from '../repositoriesView';
 import { CompareBranchNode } from './compareBranchNode';
 import { BranchesNode } from './branchesNode';
@@ -19,14 +21,14 @@ import { BranchNode } from './branchNode';
 import { BranchTrackingStatusNode } from './branchTrackingStatusNode';
 import { MessageNode } from './common';
 import { ContributorsNode } from './contributorsNode';
+import { MergeStatusNode } from './mergeStatusNode';
+import { RebaseStatusNode } from './rebaseStatusNode';
 import { ReflogNode } from './reflogNode';
 import { RemotesNode } from './remotesNode';
 import { StashesNode } from './stashesNode';
 import { StatusFilesNode } from './statusFilesNode';
 import { TagsNode } from './tagsNode';
-import { ResourceType, SubscribeableViewNode, ViewNode } from './viewNode';
-
-const hasTimeRegex = /[hHm]/;
+import { ContextValues, SubscribeableViewNode, ViewNode } from './viewNode';
 
 export class RepositoryNode extends SubscribeableViewNode<RepositoriesView> {
 	static key = ':repository';
@@ -35,7 +37,6 @@ export class RepositoryNode extends SubscribeableViewNode<RepositoriesView> {
 	}
 
 	private _children: ViewNode[] | undefined;
-	private _lastFetched: number = 0;
 	private _status: Promise<GitStatus | undefined>;
 
 	constructor(uri: GitUri, view: RepositoriesView, parent: ViewNode, public readonly repo: Repository) {
@@ -57,7 +58,7 @@ export class RepositoryNode extends SubscribeableViewNode<RepositoriesView> {
 			const children = [];
 
 			const status = await this._status;
-			if (status !== undefined) {
+			if (status != null) {
 				const branch = new GitBranch(
 					status.repoPath,
 					status.branch,
@@ -68,96 +69,165 @@ export class RepositoryNode extends SubscribeableViewNode<RepositoriesView> {
 					status.upstream,
 					status.state.ahead,
 					status.state.behind,
-					status.detached
+					status.detached,
+					status.rebasing,
 				);
-				children.push(new BranchNode(this.uri, this.view, this, branch, true));
 
-				if (status.state.behind) {
-					children.push(new BranchTrackingStatusNode(this.view, this, branch, status, 'behind', true));
+				if (this.view.config.showBranchComparison !== false) {
+					children.push(
+						new CompareBranchNode(
+							this.uri,
+							this.view,
+							this,
+							branch,
+							this.view.config.showBranchComparison,
+							true,
+						),
+					);
 				}
 
-				if (status.state.ahead) {
-					children.push(new BranchTrackingStatusNode(this.view, this, branch, status, 'ahead', true));
+				const [mergeStatus, rebaseStatus] = await Promise.all([
+					Container.git.getMergeStatus(status.repoPath),
+					Container.git.getRebaseStatus(status.repoPath),
+				]);
+
+				if (mergeStatus != null) {
+					children.push(new MergeStatusNode(this.view, this, branch, mergeStatus, status, true));
+				} else if (rebaseStatus != null) {
+					children.push(new RebaseStatusNode(this.view, this, branch, rebaseStatus, status, true));
+				} else if (this.view.config.showUpstreamStatus) {
+					if (status.upstream) {
+						if (!status.state.behind && !status.state.ahead) {
+							children.push(new BranchTrackingStatusNode(this.view, this, branch, status, 'same', true));
+						} else {
+							if (status.state.behind) {
+								children.push(
+									new BranchTrackingStatusNode(this.view, this, branch, status, 'behind', true),
+								);
+							}
+
+							if (status.state.ahead) {
+								children.push(
+									new BranchTrackingStatusNode(this.view, this, branch, status, 'ahead', true, {
+										showAheadCommits: true,
+									}),
+								);
+							}
+						}
+					} else {
+						children.push(new BranchTrackingStatusNode(this.view, this, branch, status, 'none', true));
+					}
 				}
 
-				if (status.state.ahead || (status.files.length !== 0 && this.includeWorkingTree)) {
-					const range = status.upstream ? `${status.upstream}..${branch.ref}` : undefined;
+				if (this.view.config.includeWorkingTree && status.files.length !== 0) {
+					const range = undefined; //status.upstream ? GitRevision.createRange(status.upstream, branch.ref) : undefined;
 					children.push(new StatusFilesNode(this.view, this, status, range));
 				}
 
-				if (this.view.config.showBranchComparison !== false) {
-					children.push(new CompareBranchNode(this.uri, this.view, this, branch));
+				if (children.length !== 0 && !this.view.config.compact) {
+					children.push(new MessageNode(this.view, this, '', GlyphChars.Dash.repeat(2), ''));
 				}
 
-				if (!this.view.config.repositories.compact) {
-					children.push(new MessageNode(this.view, this, '', GlyphChars.Dash.repeat(2), ''));
+				if (this.view.config.showCommits) {
+					children.push(
+						new BranchNode(this.uri, this.view, this, branch, true, {
+							showAsCommits: true,
+							showComparison: false,
+							showCurrent: false,
+							showStatus: false,
+							showTracking: false,
+						}),
+					);
 				}
 			}
 
-			children.push(
-				new BranchesNode(this.uri, this.view, this, this.repo),
-				new ContributorsNode(this.uri, this.view, this, this.repo)
-			);
+			if (this.view.config.showBranches) {
+				children.push(new BranchesNode(this.uri, this.view, this, this.repo));
+			}
 
-			children.push(new ReflogNode(this.uri, this.view, this, this.repo));
+			if (this.view.config.showRemotes) {
+				children.push(new RemotesNode(this.uri, this.view, this, this.repo));
+			}
 
-			children.push(
-				new RemotesNode(this.uri, this.view, this, this.repo),
-				new StashesNode(this.uri, this.view, this, this.repo),
-				new TagsNode(this.uri, this.view, this, this.repo)
-			);
+			if (this.view.config.showStashes) {
+				children.push(new StashesNode(this.uri, this.view, this, this.repo));
+			}
+
+			if (this.view.config.showTags) {
+				children.push(new TagsNode(this.uri, this.view, this, this.repo));
+			}
+
+			if (this.view.config.showContributors) {
+				children.push(new ContributorsNode(this.uri, this.view, this, this.repo));
+			}
+
+			if (this.view.config.showIncomingActivity) {
+				children.push(new ReflogNode(this.uri, this.view, this, this.repo));
+			}
+
 			this._children = children;
 		}
 		return this._children;
 	}
 
 	async getTreeItem(): Promise<TreeItem> {
-		const label = this.repo.formattedName || this.uri.repoPath || '';
+		const label = this.repo.formattedName ?? this.uri.repoPath ?? '';
 
-		this._lastFetched = await this.repo.getLastFetched();
-
-		const lastFetchedTooltip = this.formatLastFetched({
-			prefix: `${Strings.pad(GlyphChars.Dash, 2, 2)}Last fetched on `,
-			format: Container.config.defaultDateFormat || 'dddd MMMM Do, YYYY',
-			includeTime: true
-		});
+		const lastFetched = (await this.repo?.getLastFetched()) ?? 0;
 
 		let description;
-		let tooltip = this.repo.formattedName
-			? `${this.repo.formattedName}${lastFetchedTooltip}\n${this.uri.repoPath}`
-			: `${this.uri.repoPath}${lastFetchedTooltip}`;
+		let tooltip = `${this.repo.formattedName ?? this.uri.repoPath ?? ''}${
+			lastFetched
+				? `${Strings.pad(GlyphChars.Dash, 2, 2)}Last fetched ${Repository.formatLastFetched(
+						lastFetched,
+						false,
+				  )}`
+				: ''
+		}${this.repo.formattedName ? `\n${this.uri.repoPath}` : ''}`;
 		let iconSuffix = '';
 		let workingStatus = '';
 
-		let contextValue: string = ResourceType.Repository;
+		let contextValue: string = ContextValues.Repository;
 		if (this.repo.starred) {
 			contextValue += '+starred';
 		}
 
 		const status = await this._status;
-		if (status !== undefined) {
-			tooltip += `\n\nCurrent branch is ${status.branch}`;
+		if (status != null) {
+			tooltip += `\n\nCurrent branch $(git-branch) ${status.branch}${status.rebasing ? ' (Rebasing)' : ''}`;
 
-			if (status.files.length !== 0 && this.includeWorkingTree) {
+			if (this.view.config.includeWorkingTree && status.files.length !== 0) {
 				workingStatus = status.getFormattedDiffStatus({
 					compact: true,
-					prefix: Strings.pad(GlyphChars.Dot, 2, 2)
+					prefix: Strings.pad(GlyphChars.Dot, 1, 1),
 				});
 			}
 
 			const upstreamStatus = status.getUpstreamStatus({
-				prefix: `${GlyphChars.Space} `
+				suffix: Strings.pad(GlyphChars.Dot, 1, 1),
 			});
 
-			description = `${status.branch}${upstreamStatus}${workingStatus}`;
+			description = `${upstreamStatus}${status.branch}${status.rebasing ? ' (Rebasing)' : ''}${workingStatus}`;
+
+			let providerName;
+			if (status.upstream != null) {
+				const providers = GitRemote.getHighlanderProviders(await Container.git.getRemotes(status.repoPath));
+				providerName = providers?.length ? providers[0].name : undefined;
+			} else {
+				const remote = await status.getRemote();
+				providerName = remote?.provider?.name;
+			}
 
 			iconSuffix = workingStatus ? '-blue' : '';
-			if (status.upstream !== undefined) {
-				tooltip += ` and is tracking ${status.upstream}\n${status.getUpstreamStatus({
-					empty: 'No commits ahead or behind',
+			if (status.upstream != null) {
+				tooltip += ` is ${status.getUpstreamStatus({
+					empty: `up to date with $(git-branch) ${status.upstream}${
+						providerName ? ` on ${providerName}` : ''
+					}`,
 					expand: true,
-					separator: '\n',
-					suffix: '\n'
+					icons: true,
+					separator: ', ',
+					suffix: ` $(git-branch) ${status.upstream}${providerName ? ` on ${providerName}` : ''}`,
 				})}`;
 
 				if (status.state.behind) {
@@ -174,29 +244,31 @@ export class RepositoryNode extends SubscribeableViewNode<RepositoriesView> {
 				tooltip += `\n\nWorking tree has uncommitted changes${status.getFormattedDiffStatus({
 					expand: true,
 					prefix: '\n',
-					separator: '\n'
+					separator: '\n',
 				})}`;
 			}
 		}
 
 		if (!this.repo.supportsChangeEvents) {
-			description = `<!>${description ? ` ${GlyphChars.Space}${description}` : ''}`;
-			tooltip += '\n\n<!> Unable to automatically detect repository changes';
+			description = `${Strings.pad(GlyphChars.Warning, 1, 0)}${
+				description ? Strings.pad(description, 2, 0) : ''
+			}`;
+			tooltip += `\n\n${GlyphChars.Warning} Unable to automatically detect repository changes`;
 		}
 
 		const item = new TreeItem(label, TreeItemCollapsibleState.Expanded);
 		item.contextValue = contextValue;
-		item.description = `${description || ''}${this.formatLastFetched({
-			prefix: `${Strings.pad(GlyphChars.Dot, 2, 2)}Last fetched `
-		})}`;
+		item.description = `${description ?? ''}${
+			lastFetched
+				? `${Strings.pad(GlyphChars.Dot, 1, 1)}Last fetched ${Repository.formatLastFetched(lastFetched)}`
+				: ''
+		}`;
 		item.iconPath = {
 			dark: Container.context.asAbsolutePath(`images/dark/icon-repo${iconSuffix}.svg`),
-			light: Container.context.asAbsolutePath(`images/light/icon-repo${iconSuffix}.svg`)
+			light: Container.context.asAbsolutePath(`images/light/icon-repo${iconSuffix}.svg`),
 		};
 		item.id = this.id;
-		item.tooltip = tooltip;
-
-		void this.ensureSubscription();
+		item.tooltip = new MarkdownString(tooltip, true);
 
 		return item;
 	}
@@ -218,10 +290,13 @@ export class RepositoryNode extends SubscribeableViewNode<RepositoriesView> {
 
 	@gate()
 	@debug()
-	async refresh() {
-		this._status = this.repo.getStatus();
+	async refresh(reset: boolean = false) {
+		if (reset) {
+			this._status = this.repo.getStatus();
 
-		this._children = undefined;
+			this._children = undefined;
+		}
+
 		await this.ensureSubscription();
 	}
 
@@ -238,118 +313,133 @@ export class RepositoryNode extends SubscribeableViewNode<RepositoriesView> {
 	}
 
 	@debug()
-	protected subscribe() {
-		const disposables = [this.repo.onDidChange(this.onRepoChanged, this)];
+	protected async subscribe() {
+		const lastFetched = (await this.repo?.getLastFetched()) ?? 0;
 
-		// if (Container.config.defaultDateStyle === DateStyle.Relative) {
-		//     disposables.push(Functions.interval(() => void this.updateLastFetched(), 60000));
-		// }
+		const disposables = [this.repo.onDidChange(this.onRepositoryChanged, this)];
 
-		if (this.includeWorkingTree) {
-			disposables.push(this.repo.onDidChangeFileSystem(this.onFileSystemChanged, this), {
-				dispose: () => this.repo.stopWatchingFileSystem()
-			});
+		const interval = Repository.getLastFetchedUpdateInterval(lastFetched);
+		if (lastFetched !== 0 && interval > 0) {
+			disposables.push(
+				Functions.interval(() => {
+					// Check if the interval should change, and if so, reset it
+					if (interval !== Repository.getLastFetchedUpdateInterval(lastFetched)) {
+						void this.resetSubscription();
+					}
 
-			this.repo.startWatchingFileSystem();
+					if (this.splatted) {
+						void this.view.triggerNodeChange(this.parent ?? this);
+					} else {
+						void this.view.triggerNodeChange(this);
+					}
+				}, interval),
+			);
+		}
+
+		if (this.view.config.includeWorkingTree) {
+			disposables.push(
+				this.repo.onDidChangeFileSystem(this.onFileSystemChanged, this),
+				this.repo.startWatchingFileSystem(),
+			);
 		}
 
 		return Disposable.from(...disposables);
 	}
 
-	private get includeWorkingTree(): boolean {
-		return this.view.config.includeWorkingTree;
+	protected get requiresResetOnVisible(): boolean {
+		return this._repoUpdatedAt !== this.repo.updatedAt;
 	}
+
+	private _repoUpdatedAt: number = this.repo.updatedAt;
 
 	@debug({
 		args: {
 			0: (e: RepositoryFileSystemChangeEvent) =>
-				`{ repository: ${e.repository ? e.repository.name : ''}, uris(${e.uris.length}): [${e.uris
+				`{ repository: ${e.repository?.name ?? ''}, uris(${e.uris.length}): [${e.uris
 					.slice(0, 1)
 					.map(u => u.fsPath)
-					.join(', ')}${e.uris.length > 1 ? ', ...' : ''}] }`
-		}
+					.join(', ')}${e.uris.length > 1 ? ', ...' : ''}] }`,
+		},
 	})
-	private onFileSystemChanged(e: RepositoryFileSystemChangeEvent) {
-		void this.triggerChange();
+	private async onFileSystemChanged(_e: RepositoryFileSystemChangeEvent) {
+		this._repoUpdatedAt = this.repo.updatedAt;
+
+		this._status = this.repo.getStatus();
+
+		if (this._children !== undefined) {
+			const status = await this._status;
+
+			let index = this._children.findIndex(c => c instanceof StatusFilesNode);
+			if (status !== undefined && (status.state.ahead || status.files.length !== 0)) {
+				let deleteCount = 1;
+				if (index === -1) {
+					index = Arrays.findLastIndex(
+						this._children,
+						c => c instanceof BranchTrackingStatusNode || c instanceof BranchNode,
+					);
+					deleteCount = 0;
+					index++;
+				}
+
+				const range = undefined; //status.upstream ? GitRevision.createRange(status.upstream, status.sha) : undefined;
+				this._children.splice(index, deleteCount, new StatusFilesNode(this.view, this, status, range));
+			} else if (index !== -1) {
+				this._children.splice(index, 1);
+			}
+		}
+
+		void this.triggerChange(false);
 	}
 
 	@debug({
 		args: {
-			0: (e: RepositoryChangeEvent) =>
-				`{ repository: ${e.repository ? e.repository.name : ''}, changes: ${e.changes.join()} }`
-		}
+			0: (e: RepositoryChangeEvent) => e.toString(),
+		},
 	})
-	private onRepoChanged(e: RepositoryChangeEvent) {
-		if (e.changed(RepositoryChange.Closed)) {
+	private onRepositoryChanged(e: RepositoryChangeEvent) {
+		this._repoUpdatedAt = this.repo.updatedAt;
+
+		if (e.changed(RepositoryChange.Closed, RepositoryChangeComparisonMode.Any)) {
 			this.dispose();
 
 			return;
 		}
 
 		if (
-			this._children === undefined ||
-			e.changed(RepositoryChange.Repository) ||
-			e.changed(RepositoryChange.Config)
+			this._children == null ||
+			e.changed(
+				RepositoryChange.Config,
+				RepositoryChange.Index,
+				RepositoryChange.Heads,
+				RepositoryChange.Status,
+				RepositoryChange.Unknown,
+				RepositoryChangeComparisonMode.Any,
+			)
 		) {
-			void this.triggerChange();
+			void this.triggerChange(true);
 
 			return;
 		}
 
-		if (e.changed(RepositoryChange.Stashes)) {
-			const node = this._children.find(c => c instanceof StashesNode);
-			if (node !== undefined) {
-				void this.view.triggerNodeChange(node);
-			}
-		}
-
-		if (e.changed(RepositoryChange.Remotes)) {
+		if (e.changed(RepositoryChange.Remotes, RepositoryChangeComparisonMode.Any)) {
 			const node = this._children.find(c => c instanceof RemotesNode);
-			if (node !== undefined) {
+			if (node != null) {
 				void this.view.triggerNodeChange(node);
 			}
 		}
 
-		if (e.changed(RepositoryChange.Tags)) {
+		if (e.changed(RepositoryChange.Stash, RepositoryChangeComparisonMode.Any)) {
+			const node = this._children.find(c => c instanceof StashesNode);
+			if (node != null) {
+				void this.view.triggerNodeChange(node);
+			}
+		}
+
+		if (e.changed(RepositoryChange.Tags, RepositoryChangeComparisonMode.Any)) {
 			const node = this._children.find(c => c instanceof TagsNode);
-			if (node !== undefined) {
+			if (node != null) {
 				void this.view.triggerNodeChange(node);
 			}
 		}
 	}
-
-	private formatLastFetched(options: { prefix?: string; format?: string; includeTime?: boolean } = {}) {
-		if (this._lastFetched === 0) return '';
-
-		// if (options.format === undefined && Container.config.defaultDateStyle === DateStyle.Relative) {
-		//     // If less than a day has passed show a relative date
-		//     if (Date.now() - this._lastFetched < Dates.MillisecondsPerDay) {
-		//         return `${options.prefix || ''}${Dates.toFormatter(new Date(this._lastFetched)).fromNow()}`;
-		//     }
-		// }
-
-		let format = options.format || Container.config.defaultDateShortFormat || 'MMM D, YYYY';
-		if (
-			(options.includeTime ||
-				// If less than a day has passed show the time too
-				(options.includeTime === undefined && Date.now() - this._lastFetched < Dates.MillisecondsPerDay)) &&
-			// If the time is already included don't do anything
-			!hasTimeRegex.test(format)
-		) {
-			format = `h:mma, ${format}`;
-		}
-
-		return `${options.prefix || ''}${Dates.getFormatter(new Date(this._lastFetched)).format(format)}`;
-	}
-
-	// @debug()
-	// private async updateLastFetched() {
-	//     const prevLastFetched = this._lastFetched;
-	//     this._lastFetched = await this.repo.getLastFetched();
-
-	//     // If the fetched date hasn't changed and it was over a day ago, kick out
-	//     if (this._lastFetched === prevLastFetched && Date.now() - this._lastFetched >= Dates.MillisecondsPerDay) return;
-
-	//     this.view.triggerNodeChange(this);
-	// }
 }

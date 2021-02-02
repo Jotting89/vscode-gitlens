@@ -1,5 +1,5 @@
 'use strict';
-import { execFile } from 'child_process';
+import { ExecException, execFile } from 'child_process';
 import * as fs from 'fs';
 import * as paths from 'path';
 import * as iconv from 'iconv-lite';
@@ -31,7 +31,7 @@ function runDownPath(exe: string): string {
 	const target = paths.join('.', exe);
 	try {
 		const stats = fs.statSync(target);
-		if (stats && stats.isFile() && isExecutable(stats)) return target;
+		if (stats?.isFile() && isExecutable(stats)) return target;
 	} catch {}
 
 	const path = process.env.PATH;
@@ -42,7 +42,7 @@ function runDownPath(exe: string): string {
 			const needle = paths.join(p, exe);
 			try {
 				stats = fs.statSync(needle);
-				if (stats && stats.isFile() && isExecutable(stats)) return needle;
+				if (stats?.isFile() && isExecutable(stats)) return needle;
 			} catch {}
 		}
 	}
@@ -53,8 +53,8 @@ function runDownPath(exe: string): string {
 function isExecutable(stats: fs.Stats) {
 	if (isWindows) return true;
 
-	const isGroup = stats.gid ? process.getgid && stats.gid === process.getgid() : true;
-	const isUser = stats.uid ? process.getuid && stats.uid === process.getuid() : true;
+	const isGroup = stats.gid ? process.getgid != null && stats.gid === process.getgid() : true;
+	const isUser = stats.uid ? process.getuid != null && stats.uid === process.getuid() : true;
 
 	return Boolean(stats.mode & 0o0001 || (stats.mode & 0o0010 && isGroup) || (stats.mode & 0o0100 && isUser));
 }
@@ -86,11 +86,11 @@ export function findExecutable(exe: string, args: string[]): { cmd: string; args
 
 	if (ps1Regex.test(exe)) {
 		const cmd = paths.join(
-			process.env.SYSTEMROOT || 'C:\\WINDOWS',
+			process.env.SYSTEMROOT ?? 'C:\\WINDOWS',
 			'System32',
 			'WindowsPowerShell',
 			'v1.0',
-			'PowerShell.exe'
+			'PowerShell.exe',
 		);
 		const psargs = ['-ExecutionPolicy', 'Unrestricted', '-NoLogo', '-NonInteractive', '-File', exe];
 
@@ -98,7 +98,7 @@ export function findExecutable(exe: string, args: string[]): { cmd: string; args
 	}
 
 	if (batOrCmdRegex.test(exe)) {
-		const cmd = paths.join(process.env.SYSTEMROOT || 'C:\\WINDOWS', 'System32', 'cmd.exe');
+		const cmd = paths.join(process.env.SYSTEMROOT ?? 'C:\\WINDOWS', 'System32', 'cmd.exe');
 		const cmdArgs = ['/C', exe, ...args];
 
 		return { cmd: cmd, args: cmdArgs };
@@ -141,48 +141,83 @@ export interface RunOptions {
 
 const bufferExceededRegex = /stdout maxBuffer( length)? exceeded/;
 
+export class RunError extends Error {
+	constructor(
+		private readonly original: ExecException,
+		public readonly stdout: string,
+		public readonly stderr: string,
+	) {
+		super(original.message);
+
+		stdout = stdout.trim();
+		stderr = stderr.trim();
+		Error.captureStackTrace(this, RunError);
+	}
+
+	get cmd(): string | undefined {
+		return this.original.cmd;
+	}
+
+	get killed(): boolean | undefined {
+		return this.original.killed;
+	}
+
+	get code(): number | undefined {
+		return this.original.code;
+	}
+
+	get signal(): NodeJS.Signals | undefined {
+		return this.original.signal;
+	}
+}
+
 export function run<TOut extends string | Buffer>(
 	command: string,
 	args: any[],
 	encoding: BufferEncoding | 'buffer',
-	options: RunOptions = {}
+	options: RunOptions = {},
 ): Promise<TOut> {
 	const { stdin, stdinEncoding, ...opts }: RunOptions = { maxBuffer: 100 * 1024 * 1024, ...options };
 
 	return new Promise<TOut>((resolve, reject) => {
-		const proc = execFile(
-			command,
-			args,
-			opts,
-			(error: (Error & { stdout?: TOut | undefined }) | null, stdout, stderr) => {
-				if (error != null) {
-					if (bufferExceededRegex.test(error.message)) {
-						error.message = `Command output exceeded the allocated stdout buffer. Set 'options.maxBuffer' to a larger value than ${opts.maxBuffer} bytes`;
-					}
+		const proc = execFile(command, args, opts, (error: ExecException | null, stdout, stderr) => {
+			if (error != null) {
+				if (bufferExceededRegex.test(error.message)) {
+					error.message = `Command output exceeded the allocated stdout buffer. Set 'options.maxBuffer' to a larger value than ${opts.maxBuffer} bytes`;
+				}
 
-					error.stdout =
+				reject(
+					new RunError(
+						error,
 						encoding === 'utf8' || encoding === 'binary' || encoding === 'buffer'
-							? (stdout as TOut)
-							: (iconv.decode(Buffer.from(stdout, 'binary'), encoding) as TOut);
-					reject(error);
-
-					return;
-				}
-
-				if (stderr) {
-					Logger.warn(`Warning(${command} ${args.join(' ')}): ${stderr}`);
-				}
-
-				resolve(
-					encoding === 'utf8' || encoding === 'binary' || encoding === 'buffer'
-						? (stdout as TOut)
-						: (iconv.decode(Buffer.from(stdout, 'binary'), encoding) as TOut)
+							? stdout
+							: iconv.decode(Buffer.from(stdout, 'binary'), encoding),
+						encoding === 'utf8' || encoding === 'binary' || encoding === 'buffer'
+							? stderr
+							: iconv.decode(Buffer.from(stderr, 'binary'), encoding),
+					),
 				);
-			}
-		);
 
-		if (stdin) {
-			proc.stdin.end(stdin, stdinEncoding || 'utf8');
+				return;
+			}
+
+			if (stderr) {
+				Logger.warn(`Warning(${command} ${args.join(' ')}): ${stderr}`);
+			}
+
+			resolve(
+				encoding === 'utf8' || encoding === 'binary' || encoding === 'buffer'
+					? (stdout as TOut)
+					: (iconv.decode(Buffer.from(stdout, 'binary'), encoding) as TOut),
+			);
+		});
+
+		if (stdin != null) {
+			proc.stdin?.end(stdin, stdinEncoding ?? 'utf8');
 		}
 	});
+}
+
+export function fsExists(path: string) {
+	return new Promise<boolean>(resolve => fs.exists(path, exists => resolve(exists)));
 }

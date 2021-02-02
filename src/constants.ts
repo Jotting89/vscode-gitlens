@@ -1,12 +1,9 @@
 'use strict';
 import { commands, TextDocument, TextEditor, window } from 'vscode';
 import { ViewShowBranchComparison } from './config';
+import { SearchPattern } from './git/git';
 
-export const applicationInsightsKey = 'a9c302f8-6483-4d01-b92c-c159c799c679';
-export const extensionId = 'gitlens';
-export const extensionOutputChannelName = 'GitLens';
-export const extensionQualifiedId = `eamodio.${extensionId}`;
-export const extensionTerminalName = 'GitLens';
+export const quickPickTitleMaxChars = 80;
 
 export enum BuiltInCommands {
 	CloseActiveEditor = 'workbench.action.closeActiveEditor',
@@ -17,38 +14,63 @@ export enum BuiltInCommands {
 	ExecuteDocumentSymbolProvider = 'vscode.executeDocumentSymbolProvider',
 	ExecuteCodeLensProvider = 'vscode.executeCodeLensProvider',
 	FocusFilesExplorer = 'workbench.files.action.focusFilesExplorer',
+	InstallExtension = 'workbench.extensions.installExtension',
 	Open = 'vscode.open',
 	OpenFolder = 'vscode.openFolder',
 	OpenInTerminal = 'openInTerminal',
+	OpenWith = 'vscode.openWith',
 	NextEditor = 'workbench.action.nextEditor',
 	PreviewHtml = 'vscode.previewHtml',
 	RevealLine = 'revealLine',
 	SetContext = 'setContext',
 	ShowExplorerActivity = 'workbench.view.explorer',
-	ShowReferences = 'editor.action.showReferences'
+	ShowReferences = 'editor.action.showReferences',
 }
 
-export enum CommandContext {
+export enum ContextKeys {
+	ActionPrefix = 'gitlens:action:',
 	ActiveFileStatus = 'gitlens:activeFileStatus',
 	AnnotationStatus = 'gitlens:annotationStatus',
-	CanToggleCodeLens = 'gitlens:canToggleCodeLens',
+	DisabledToggleCodeLens = 'gitlens:disabledToggleCodeLens',
+	Disabled = 'gitlens:disabled',
 	Enabled = 'gitlens:enabled',
+	HasConnectedRemotes = 'gitlens:hasConnectedRemotes',
 	HasRemotes = 'gitlens:hasRemotes',
+	HasRichRemotes = 'gitlens:hasRichRemotes',
 	Key = 'gitlens:key',
 	Readonly = 'gitlens:readonly',
 	ViewsCanCompare = 'gitlens:views:canCompare',
 	ViewsCanCompareFile = 'gitlens:views:canCompare:file',
-	ViewsCompareKeepResults = 'gitlens:views:compare:keepResults',
-	ViewsHideSupportGitLens = 'gitlens:views:supportGitLens:hide',
+	ViewsCommitsMyCommitsOnly = 'gitlens:views:commits:myCommitsOnly',
+	ViewsFileHistoryCanPin = 'gitlens:views:fileHistory:canPin',
+	ViewsFileHistoryCursorFollowing = 'gitlens:views:fileHistory:cursorFollowing',
 	ViewsFileHistoryEditorFollowing = 'gitlens:views:fileHistory:editorFollowing',
 	ViewsLineHistoryEditorFollowing = 'gitlens:views:lineHistory:editorFollowing',
 	ViewsRepositoriesAutoRefresh = 'gitlens:views:repositories:autoRefresh',
-	ViewsSearchKeepResults = 'gitlens:views:search:keepResults',
-	Vsls = 'gitlens:vsls'
+	ViewsSearchAndCompareKeepResults = 'gitlens:views:searchAndCompare:keepResults',
+	ViewsUpdatesVisible = 'gitlens:views:updates:visible',
+	ViewsWelcomeVisible = 'gitlens:views:welcome:visible',
+	Vsls = 'gitlens:vsls',
 }
 
-export function setCommandContext(key: CommandContext | string, value: any) {
+export function setContext(key: ContextKeys | string, value: any) {
 	return commands.executeCommand(BuiltInCommands.SetContext, key, value);
+}
+
+export enum Colors {
+	GutterBackgroundColor = 'gitlens.gutterBackgroundColor',
+	GutterForegroundColor = 'gitlens.gutterForegroundColor',
+	GutterUncommittedForegroundColor = 'gitlens.gutterUncommittedForegroundColor',
+	TrailingLineBackgroundColor = 'gitlens.trailingLineBackgroundColor',
+	TrailingLineForegroundColor = 'gitlens.trailingLineForegroundColor',
+	LineHighlightBackgroundColor = 'gitlens.lineHighlightBackgroundColor',
+	LineHighlightOverviewRulerColor = 'gitlens.lineHighlightOverviewRulerColor',
+	ClosedPullRequestIconColor = 'gitlens.closedPullRequestIconColor',
+	OpenPullRequestIconColor = 'gitlens.openPullRequestIconColor',
+	MergedPullRequestIconColor = 'gitlens.mergedPullRequestIconColor',
+	UnpushlishedChangesIconColor = 'gitlens.unpushlishedChangesIconColor',
+	UnpublishedCommitIconColor = 'gitlens.unpublishedCommitIconColor',
+	UnpulledChangesIconColor = 'gitlens.unpulledChangesIconColor',
 }
 
 export enum DocumentSchemes {
@@ -58,7 +80,7 @@ export enum DocumentSchemes {
 	GitLens = 'gitlens',
 	Output = 'output',
 	PRs = 'pr',
-	Vsls = 'vsls'
+	Vsls = 'vsls',
 }
 
 export function getEditorIfActive(document: TextDocument): TextEditor | undefined {
@@ -123,14 +145,27 @@ export enum GlyphChars {
 	SpaceThinnest = '\u200A',
 	SquareWithBottomShadow = '\u274F',
 	SquareWithTopShadow = '\u2750',
-	ZeroWidthSpace = '\u200b'
+	Warning = '\u26a0',
+	ZeroWidthSpace = '\u200b',
+}
+
+export enum SyncedState {
+	DisallowConnectionPrefix = 'gitlens:disallow:connection:',
+	UpdatesViewVisible = 'gitlens:views:updates:visible',
+	Version = 'gitlens:synced:version',
+	WelcomeViewVisible = 'gitlens:views:welcome:visible',
 }
 
 export enum GlobalState {
-	GitLensVersion = 'gitlensVersion'
+	Avatars = 'gitlens:avatars',
+	PendingWelcomeOnFocus = 'gitlens:pendingWelcomeOnFocus',
+	PendingWhatsNewOnFocus = 'gitlens:pendingWhatsNewOnFocus',
+	Version = 'gitlens:version',
+
+	Deprecated_Version = 'gitlensVersion',
 }
 
-export const ImageMimetypes: { [key: string]: string } = {
+export const ImageMimetypes: Record<string, string> = {
 	'.png': 'image/png',
 	'.gif': 'image/gif',
 	'.jpg': 'image/jpeg',
@@ -139,12 +174,12 @@ export const ImageMimetypes: { [key: string]: string } = {
 	'.webp': 'image/webp',
 	'.tif': 'image/tiff',
 	'.tiff': 'image/tiff',
-	'.bmp': 'image/bmp'
+	'.bmp': 'image/bmp',
 };
 
 export interface BranchComparison {
 	ref: string;
-	notation: '...' | '..' | undefined;
+	notation: '..' | '...' | undefined;
 	type: Exclude<ViewShowBranchComparison, false> | undefined;
 }
 
@@ -158,31 +193,55 @@ export interface NamedRef {
 }
 
 export interface PinnedComparison {
+	type: 'comparison';
+	timestamp: number;
 	path: string;
 	ref1: NamedRef;
 	ref2: NamedRef;
-	notation: '...' | '..' | undefined;
+	notation?: '..' | '...';
 }
 
-export interface PinnedComparisons {
-	[id: string]: PinnedComparison;
+export interface PinnedSearch {
+	type: 'search';
+	timestamp: number;
+	path: string;
+	labels: {
+		label: string;
+		queryLabel:
+			| string
+			| {
+					label: string;
+					resultsType?: { singular: string; plural: string };
+			  };
+	};
+	search: SearchPattern;
 }
 
-export interface StarredBranches {
+export type PinnedItem = PinnedComparison | PinnedSearch;
+
+export interface PinnedItems {
+	[id: string]: PinnedItem;
+}
+
+export interface Starred {
 	[id: string]: boolean;
 }
 
-export interface StarredRepositories {
-	[id: string]: boolean;
+export interface Usage {
+	[id: string]: number;
 }
 
 export enum WorkspaceState {
 	BranchComparisons = 'gitlens:branch:comparisons',
+	ConnectedPrefix = 'gitlens:connected:',
 	DefaultRemote = 'gitlens:remote:default',
-	PinnedComparisons = 'gitlens:pinned:comparisons',
+	DisallowConnectionPrefix = 'gitlens:disallow:connection:',
+	GitCommandPaletteUsage = 'gitlens:gitComandPalette:usage',
 	StarredBranches = 'gitlens:starred:branches',
 	StarredRepositories = 'gitlens:starred:repositories',
-	ViewsCompareKeepResults = 'gitlens:views:compare:keepResults',
 	ViewsRepositoriesAutoRefresh = 'gitlens:views:repositories:autoRefresh',
-	ViewsSearchKeepResults = 'gitlens:views:search:keepResults'
+	ViewsSearchAndCompareKeepResults = 'gitlens:views:searchAndCompare:keepResults',
+	ViewsSearchAndComparePinnedItems = 'gitlens:views:searchAndCompare:pinned',
+
+	Deprecated_PinnedComparisons = 'gitlens:pinned:comparisons',
 }

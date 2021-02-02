@@ -1,6 +1,6 @@
 'use strict';
 import { debug, Strings } from '../../system';
-import { GitFileStatus, GitStatus, GitStatusFile } from '../git';
+import { GitStatus, GitStatusFile } from '../git';
 
 const emptyStr = '';
 
@@ -12,7 +12,7 @@ export class GitStatusParser {
 	static parse(data: string, repoPath: string, porcelainVersion: number): GitStatus | undefined {
 		if (!data) return undefined;
 
-		const lines = data.split('\n').filter(Boolean);
+		const lines = data.split('\n').filter(<T>(i?: T): i is T => Boolean(i));
 		if (lines.length === 0) return undefined;
 
 		if (porcelainVersion < 2) return this.parseV1(lines, repoPath);
@@ -26,7 +26,7 @@ export class GitStatusParser {
 		const files = [];
 		const state = {
 			ahead: 0,
-			behind: 0
+			behind: 0,
 		};
 		let upstream;
 
@@ -49,7 +49,7 @@ export class GitStatusParser {
 			} else {
 				const rawStatus = line.substring(0, 2);
 				const fileName = line.substring(3);
-				if (rawStatus.startsWith('R')) {
+				if (rawStatus.startsWith('R') || rawStatus.startsWith('C')) {
 					const [file1, file2] = fileName.replace(/"/g, emptyStr).split('->');
 					files.push(this.parseStatusFile(repoPath, rawStatus, file2.trim(), file1.trim()));
 				} else {
@@ -58,7 +58,7 @@ export class GitStatusParser {
 			}
 		}
 
-		return new GitStatus(Strings.normalizePath(repoPath), branch || emptyStr, emptyStr, files, state, upstream);
+		return new GitStatus(Strings.normalizePath(repoPath), branch ?? emptyStr, emptyStr, files, state, upstream);
 	}
 
 	@debug({ args: false, singleLine: true })
@@ -68,7 +68,7 @@ export class GitStatusParser {
 		let sha: string | undefined;
 		const state = {
 			ahead: 0,
-			behind: 0
+			behind: 0,
 		};
 		let upstream;
 
@@ -101,10 +101,7 @@ export class GitStatusParser {
 						break;
 					case '2': {
 						// rename
-						const file = lineParts
-							.slice(9)
-							.join(' ')
-							.split('\t');
+						const file = lineParts.slice(9).join(' ').split('\t');
 						files.push(this.parseStatusFile(repoPath, lineParts[1], file[0], file[1]));
 						break;
 					}
@@ -120,11 +117,11 @@ export class GitStatusParser {
 
 		return new GitStatus(
 			Strings.normalizePath(repoPath),
-			branch || emptyStr,
-			sha || emptyStr,
+			branch ?? emptyStr,
+			sha ?? emptyStr,
 			files,
 			state,
-			upstream
+			upstream,
 		);
 	}
 
@@ -132,27 +129,21 @@ export class GitStatusParser {
 		repoPath: string,
 		rawStatus: string,
 		fileName: string,
-		originalFileName?: string
+		originalFileName?: string,
 	): GitStatusFile {
-		let indexStatus = !rawStatus.startsWith('.') ? rawStatus[0].trim() : undefined;
-		if (indexStatus == null || indexStatus.length === 0) {
-			indexStatus = undefined;
+		let x = !rawStatus.startsWith('.') ? rawStatus[0].trim() : undefined;
+		if (x == null || x.length === 0) {
+			x = undefined;
 		}
 
-		let workTreeStatus = undefined;
+		let y = undefined;
 		if (rawStatus.length > 1) {
-			workTreeStatus = rawStatus[1] !== '.' ? rawStatus[1].trim() : undefined;
-			if (workTreeStatus == null || workTreeStatus.length === 0) {
-				workTreeStatus = undefined;
+			y = rawStatus[1] !== '.' ? rawStatus[1].trim() : undefined;
+			if (y == null || y.length === 0) {
+				y = undefined;
 			}
 		}
 
-		return new GitStatusFile(
-			repoPath,
-			indexStatus as GitFileStatus | undefined,
-			workTreeStatus as GitFileStatus | undefined,
-			fileName,
-			originalFileName
-		);
+		return new GitStatusFile(repoPath, x, y, fileName, originalFileName);
 	}
 }

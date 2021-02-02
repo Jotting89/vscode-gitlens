@@ -1,5 +1,5 @@
 'use strict';
-import { Promises } from '../promise';
+import { is as isPromise } from '../promise';
 
 const emptyStr = '';
 
@@ -30,30 +30,41 @@ export function gate<T extends (...arg: any) => any>(resolver?: (...args: Parame
 
 		const gateKey = `$gate$${key}`;
 
-		descriptor.value = function(this: any, ...args: any[]) {
+		descriptor.value = function (this: any, ...args: any[]) {
 			const prop =
-				args.length === 0 ? gateKey : `${gateKey}$${(resolver || defaultResolver)(...(args as Parameters<T>))}`;
+				args.length === 0 ? gateKey : `${gateKey}$${(resolver ?? defaultResolver)(...(args as Parameters<T>))}`;
 
 			if (!Object.prototype.hasOwnProperty.call(this, prop)) {
 				Object.defineProperty(this, prop, {
 					configurable: false,
 					enumerable: false,
 					writable: true,
-					value: undefined
+					value: undefined,
 				});
 			}
 
 			let promise = this[prop];
 			if (promise === undefined) {
-				const result = fn!.apply(this, args);
-				if (result == null || !Promises.is(result)) {
-					return result;
-				}
+				let result;
+				try {
+					result = fn!.apply(this, args);
+					if (result == null || !isPromise(result)) {
+						return result;
+					}
 
-				this[prop] = promise = result.then((r: any) => {
+					this[prop] = promise = result
+						.then((r: any) => {
+							this[prop] = undefined;
+							return r;
+						})
+						.catch(ex => {
+							this[prop] = undefined;
+							throw ex;
+						});
+				} catch (ex) {
 					this[prop] = undefined;
-					return r;
-				});
+					throw ex;
+				}
 			}
 
 			return promise;

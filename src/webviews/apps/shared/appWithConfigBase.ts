@@ -3,18 +3,31 @@
 import {
 	AppStateWithConfig,
 	DidChangeConfigurationNotificationType,
+	DidPreviewConfigurationNotificationType,
 	IpcMessage,
 	onIpcNotification,
-	UpdateConfigurationCommandType
+	PreviewConfigurationCommandType,
+	UpdateConfigurationCommandType,
 } from '../../protocol';
-import { DOM } from './dom';
 import { App } from './appBase';
-import { Dates } from '../../../system/date';
+import { DOM } from './dom';
+import { getDateFormatter } from '../shared/date';
 
-const dateFormatter = Dates.getFormatter(new Date('Wed Jul 25 2018 19:18:00 GMT-0400'));
+const dateFormatter = getDateFormatter(new Date('Wed Jul 25 2018 19:18:00 GMT-0400'));
+
+let ipcSequence = 0;
+function nextIpcId() {
+	if (ipcSequence === Number.MAX_SAFE_INTEGER) {
+		ipcSequence = 1;
+	} else {
+		ipcSequence++;
+	}
+
+	return `${ipcSequence}`;
+}
 
 export abstract class AppWithConfig<TState extends AppStateWithConfig> extends App<TState> {
-	private _changes: { [key: string]: any } = Object.create(null);
+	private _changes = Object.create(null) as Record<string, any>;
 	private _updating: boolean = false;
 
 	constructor(appName: string, state: TState) {
@@ -22,34 +35,49 @@ export abstract class AppWithConfig<TState extends AppStateWithConfig> extends A
 	}
 
 	protected onInitialized() {
-		this.setState();
+		this.updateState();
 	}
 
-	protected onBind(me: this) {
-		DOM.listenAll('input[type=checkbox][data-setting]', 'change', function(this: HTMLInputElement) {
-			return me.onInputChecked(this);
-		});
-		DOM.listenAll('input[type=text][data-setting], input:not([type])[data-setting]', 'blur', function(
-			this: HTMLInputElement
-		) {
-			return me.onInputBlurred(this);
-		});
-		DOM.listenAll('input[type=text][data-setting], input:not([type])[data-setting]', 'focus', function(
-			this: HTMLInputElement
-		) {
-			return me.onInputFocused(this);
-		});
-		DOM.listenAll('input[type=text][data-setting][data-setting-preview]', 'input', function(
-			this: HTMLInputElement
-		) {
-			return me.onInputChanged(this);
-		});
-		DOM.listenAll('select[data-setting]', 'change', function(this: HTMLSelectElement) {
-			return me.onInputSelected(this);
-		});
-		DOM.listenAll('.popup', 'mousedown', function(this: HTMLElement, e: Event) {
-			return me.onPopupMouseDown(this, e as MouseEvent);
-		});
+	protected onBind() {
+		const disposables = super.onBind?.() ?? [];
+
+		// eslint-disable-next-line @typescript-eslint/no-this-alias
+		const me = this;
+
+		disposables.push(
+			DOM.on('input[type=checkbox][data-setting]', 'change', function (this: HTMLInputElement) {
+				return me.onInputChecked(this);
+			}),
+			DOM.on(
+				'input[type=text][data-setting], input[type=number][data-setting], input:not([type])[data-setting]',
+				'blur',
+				function (this: HTMLInputElement) {
+					return me.onInputBlurred(this);
+				},
+			),
+			DOM.on(
+				'input[type=text][data-setting], input[type=number][data-setting], input:not([type])[data-setting]',
+				'focus',
+				function (this: HTMLInputElement) {
+					return me.onInputFocused(this);
+				},
+			),
+			DOM.on(
+				'input[type=text][data-setting][data-setting-preview], input[type=number][data-setting][data-setting-preview]',
+				'input',
+				function (this: HTMLInputElement) {
+					return me.onInputChanged(this);
+				},
+			),
+			DOM.on('select[data-setting]', 'change', function (this: HTMLSelectElement) {
+				return me.onInputSelected(this);
+			}),
+			DOM.on('.popup', 'mousedown', function (this: HTMLElement, e: Event) {
+				return me.onPopupMouseDown(this, e as MouseEvent);
+			}),
+		);
+
+		return disposables;
 	}
 
 	protected onMessageReceived(e: MessageEvent) {
@@ -59,8 +87,9 @@ export abstract class AppWithConfig<TState extends AppStateWithConfig> extends A
 			case DidChangeConfigurationNotificationType.method:
 				onIpcNotification(DidChangeConfigurationNotificationType, msg, params => {
 					this.state.config = params.config;
+					this.state.customSettings = params.customSettings;
 
-					this.setState();
+					this.updateState();
 				});
 				break;
 
@@ -75,10 +104,10 @@ export abstract class AppWithConfig<TState extends AppStateWithConfig> extends A
 		this.sendCommand(UpdateConfigurationCommandType, {
 			changes: { ...this._changes },
 			removes: Object.keys(this._changes).filter(k => this._changes[k] === undefined),
-			scope: this.getSettingsScope()
+			scope: this.getSettingsScope(),
 		});
 
-		this._changes = Object.create(null);
+		this._changes = Object.create(null) as Record<string, any>;
 	}
 
 	protected getSettingsScope(): 'user' | 'workspace' {
@@ -101,7 +130,7 @@ export abstract class AppWithConfig<TState extends AppStateWithConfig> extends A
 			}
 		}
 
-		this._changes[element.name] = value;
+		this._changes[element.name] = element.type === 'number' && value != null ? Number(value) : value;
 
 		// this.setAdditionalSettings(element.checked ? element.dataset.addSettingsOn : element.dataset.addSettingsOff);
 		this.applyChanges();
@@ -119,14 +148,14 @@ export abstract class AppWithConfig<TState extends AppStateWithConfig> extends A
 		if (this._updating) return;
 
 		this.log(
-			`${this.appName}.onInputChecked: name=${element.name}, checked=${element.checked}, value=${element.value}`
+			`${this.appName}.onInputChecked: name=${element.name}, checked=${element.checked}, value=${element.value}`,
 		);
 
 		switch (element.dataset.settingType) {
 			case 'object': {
 				const props = element.name.split('.');
 				const settingName = props.splice(0, 1)[0];
-				const setting = this.getSettingValue(settingName) || Object.create(null);
+				const setting = this.getSettingValue(settingName) ?? Object.create(null);
 
 				if (element.checked) {
 					set(setting, props.join('.'), fromCheckboxValue(element.value));
@@ -139,7 +168,7 @@ export abstract class AppWithConfig<TState extends AppStateWithConfig> extends A
 				break;
 			}
 			case 'array': {
-				const setting = this.getSettingValue(element.name) || [];
+				const setting = this.getSettingValue(element.name) ?? [];
 				if (Array.isArray(setting)) {
 					if (element.checked) {
 						if (!setting.includes(element.value)) {
@@ -153,6 +182,11 @@ export abstract class AppWithConfig<TState extends AppStateWithConfig> extends A
 					}
 					this._changes[element.name] = setting;
 				}
+
+				break;
+			}
+			case 'custom': {
+				this._changes[element.name] = element.checked;
 
 				break;
 			}
@@ -192,18 +226,16 @@ export abstract class AppWithConfig<TState extends AppStateWithConfig> extends A
 
 		this.log(`${this.appName}.onInputSelected: name=${element.name}, value=${value}`);
 
-		this._changes[element.name] = ensureIfBoolean(value);
+		this._changes[element.name] = ensureIfBooleanOrNull(value);
 
 		this.applyChanges();
 	}
 
 	protected onPopupMouseDown(element: HTMLElement, e: MouseEvent) {
-		// e.stopPropagation();
-		// e.stopImmediatePropagation();
 		e.preventDefault();
 
 		const el = e.target as HTMLElement;
-		if (el && el.matches('[data-token]')) {
+		if (el?.matches('[data-token]')) {
 			this.onTokenMouseDown(el, e);
 		}
 	}
@@ -219,14 +251,33 @@ export abstract class AppWithConfig<TState extends AppStateWithConfig> extends A
 		const input = setting.querySelector<HTMLInputElement>('input[type=text], input:not([type])');
 		if (input == null) return;
 
-		input.value += `\${${element.dataset.token}}`;
+		const token = `\${${element.dataset.token}}`;
+		let selectionStart = input.selectionStart;
+		if (selectionStart != null) {
+			input.value = `${input.value.substring(0, selectionStart)}${token}${input.value.substr(
+				input.selectionEnd ?? selectionStart,
+			)}`;
+
+			selectionStart += token.length;
+		} else {
+			selectionStart = input.value.length;
+		}
+
+		input.focus();
+		input.setSelectionRange(selectionStart, selectionStart);
+		if (selectionStart === input.value.length) {
+			input.scrollLeft = input.scrollWidth;
+		}
+
+		setTimeout(() => this.onInputChanged(input), 0);
+		setTimeout(() => input.focus(), 250);
 
 		e.stopPropagation();
 		e.stopImmediatePropagation();
 		e.preventDefault();
 	}
 
-	private evaluateStateExpression(expression: string, changes: { [key: string]: string | boolean }): boolean {
+	private evaluateStateExpression(expression: string, changes: Record<string, string | boolean>): boolean {
 		let state = false;
 		for (const expr of expression.trim().split('&')) {
 			const [lhs, op, rhs] = parseStateExpression(expr);
@@ -236,7 +287,7 @@ export abstract class AppWithConfig<TState extends AppStateWithConfig> extends A
 					// Equals
 					let value = changes[lhs];
 					if (value === undefined) {
-						value = this.getSettingValue<string | boolean>(lhs) || false;
+						value = this.getSettingValue<string | boolean>(lhs) ?? false;
 					}
 					state = rhs !== undefined ? rhs === String(value) : Boolean(value);
 					break;
@@ -245,8 +296,9 @@ export abstract class AppWithConfig<TState extends AppStateWithConfig> extends A
 					// Not equals
 					let value = changes[lhs];
 					if (value === undefined) {
-						value = this.getSettingValue<string | boolean>(lhs) || false;
+						value = this.getSettingValue<string | boolean>(lhs) ?? false;
 					}
+					// eslint-disable-next-line @typescript-eslint/strict-boolean-expressions
 					state = rhs !== undefined ? rhs !== String(value) : !value;
 					break;
 				}
@@ -265,29 +317,38 @@ export abstract class AppWithConfig<TState extends AppStateWithConfig> extends A
 		return state;
 	}
 
+	private getCustomSettingValue(path: string): boolean | undefined {
+		return this.state.customSettings?.[path];
+	}
+
 	private getSettingValue<T>(path: string): T | undefined {
+		const customSetting = this.getCustomSettingValue(path);
+		if (customSetting != null) return customSetting as any;
+
 		return get<T>(this.state.config, path);
 	}
 
-	private setState() {
+	private updateState() {
 		this._updating = true;
 
 		try {
 			for (const el of document.querySelectorAll<HTMLInputElement>('input[type=checkbox][data-setting]')) {
-				if (el.dataset.settingType === 'array') {
-					el.checked = (this.getSettingValue<string[]>(el.name) || []).includes(el.value);
+				if (el.dataset.settingType === 'custom') {
+					el.checked = this.getCustomSettingValue(el.name) ?? false;
+				} else if (el.dataset.settingType === 'array') {
+					el.checked = (this.getSettingValue<string[]>(el.name) ?? []).includes(el.value);
 				} else if (el.dataset.valueOff != null) {
 					const value = this.getSettingValue<string>(el.name);
 					el.checked = el.dataset.valueOff !== value;
 				} else {
-					el.checked = this.getSettingValue<boolean>(el.name) || false;
+					el.checked = this.getSettingValue<boolean>(el.name) ?? false;
 				}
 			}
 
 			for (const el of document.querySelectorAll<HTMLInputElement>(
-				'input[type=text][data-setting], input:not([type])[data-setting]'
+				'input[type=text][data-setting], input[type=number][data-setting], input:not([type])[data-setting]',
 			)) {
-				el.value = this.getSettingValue<string>(el.name) || '';
+				el.value = this.getSettingValue<string>(el.name) ?? '';
 			}
 
 			for (const el of document.querySelectorAll<HTMLSelectElement>('select[data-setting]')) {
@@ -319,7 +380,7 @@ export abstract class AppWithConfig<TState extends AppStateWithConfig> extends A
 		}
 	}
 
-	private setEnablement(state: { [key: string]: string | boolean }) {
+	private setEnablement(state: Record<string, string | boolean>) {
 		for (const el of document.querySelectorAll<HTMLElement>('[data-enablement]')) {
 			const disabled = !this.evaluateStateExpression(el.dataset.enablement!, state);
 			if (disabled) {
@@ -339,7 +400,7 @@ export abstract class AppWithConfig<TState extends AppStateWithConfig> extends A
 		}
 	}
 
-	private setVisibility(state: { [key: string]: string | boolean }) {
+	private setVisibility(state: Record<string, string | boolean>) {
 		for (const el of document.querySelectorAll<HTMLElement>('[data-visibility]')) {
 			el.classList.toggle('hidden', !this.evaluateStateExpression(el.dataset.visibility!, state));
 		}
@@ -347,7 +408,7 @@ export abstract class AppWithConfig<TState extends AppStateWithConfig> extends A
 
 	private updatePreview(el: HTMLSpanElement, value?: string) {
 		switch (el.dataset.settingPreviewType) {
-			case 'date':
+			case 'date': {
 				if (value === undefined) {
 					value = this.getSettingValue<string>(el.dataset.settingPreview!);
 				}
@@ -358,24 +419,61 @@ export abstract class AppWithConfig<TState extends AppStateWithConfig> extends A
 
 				el.innerText = value == null ? '' : dateFormatter.format(value);
 				break;
+			}
+			case 'commit': {
+				if (value === undefined) {
+					value = this.getSettingValue<string>(el.dataset.settingPreview!);
+				}
 
+				if (value == null || value.length === 0) {
+					value = el.dataset.settingPreviewDefault;
+				}
+
+				if (value == null) {
+					el.innerText = '';
+
+					return;
+				}
+
+				const id = nextIpcId();
+				const disposable = DOM.on(window, 'message', (e: MessageEvent) => {
+					const msg = e.data as IpcMessage;
+
+					if (msg.method === DidPreviewConfigurationNotificationType.method && msg.params.id === id) {
+						disposable.dispose();
+						onIpcNotification(DidPreviewConfigurationNotificationType, msg, params => {
+							el.innerText = params.preview ?? '';
+						});
+					}
+				});
+
+				this.sendCommand(PreviewConfigurationCommandType, {
+					key: el.dataset.settingPreview!,
+					type: 'commit',
+					id: id,
+					format: value,
+				});
+
+				break;
+			}
 			default:
 				break;
 		}
 	}
 }
 
-function ensureIfBoolean(value: string | boolean): string | boolean {
+function ensureIfBooleanOrNull(value: string | boolean): string | boolean | null {
 	if (value === 'true') return true;
 	if (value === 'false') return false;
+	if (value === 'null') return null;
 	return value;
 }
 
-function get<T>(o: { [key: string]: any }, path: string): T | undefined {
+function get<T>(o: Record<string, any>, path: string): T | undefined {
 	return path.split('.').reduce((o = {}, key) => (o == null ? undefined : o[key]), o) as T;
 }
 
-function set(o: { [key: string]: any }, path: string, value: any): { [key: string]: any } {
+function set(o: Record<string, any>, path: string, value: any): Record<string, any> {
 	const props = path.split('.');
 	const length = props.length;
 	const lastIndex = length - 1;
@@ -399,11 +497,11 @@ function set(o: { [key: string]: any }, path: string, value: any): { [key: strin
 	return o;
 }
 
-function parseAdditionalSettingsExpression(expression: string): [string, string | boolean][] {
+function parseAdditionalSettingsExpression(expression: string): [string, string | boolean | null][] {
 	const settingsExpression = expression.trim().split(',');
-	return settingsExpression.map<[string, string | boolean]>(s => {
+	return settingsExpression.map<[string, string | boolean | null]>(s => {
 		const [setting, value] = s.split('=');
-		return [setting, ensureIfBoolean(value)];
+		return [setting, ensureIfBooleanOrNull(value)];
 	});
 }
 
@@ -412,8 +510,8 @@ function parseStateExpression(expression: string): [string, string, string | boo
 	return [lhs.trim(), op !== undefined ? op.trim() : '=', rhs !== undefined ? rhs.trim() : rhs];
 }
 
-function flatten(o: { [key: string]: any }, path?: string): { [key: string]: any } {
-	const results: { [key: string]: any } = {};
+function flatten(o: Record<string, any>, path?: string): Record<string, any> {
+	const results: Record<string, any> = {};
 
 	for (const key in o) {
 		const value = o[key];

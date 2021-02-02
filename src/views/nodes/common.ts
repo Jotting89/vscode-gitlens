@@ -2,7 +2,7 @@ import { Command, ThemeIcon, TreeItem, TreeItemCollapsibleState, Uri } from 'vsc
 import { GlyphChars } from '../../constants';
 import { Container } from '../../container';
 import { View } from '../viewBase';
-import { PageableViewNode, ResourceType, unknownGitUri, ViewNode } from './viewNode';
+import { ContextValues, PageableViewNode, unknownGitUri, ViewNode } from './viewNode';
 
 export class MessageNode extends ViewNode {
 	constructor(
@@ -18,7 +18,8 @@ export class MessageNode extends ViewNode {
 					light: string | Uri;
 					dark: string | Uri;
 			  }
-			| ThemeIcon
+			| ThemeIcon,
+		private readonly _contextValue?: string,
 	) {
 		super(unknownGitUri, view, parent);
 	}
@@ -29,7 +30,7 @@ export class MessageNode extends ViewNode {
 
 	getTreeItem(): TreeItem | Promise<TreeItem> {
 		const item = new TreeItem(this._message, TreeItemCollapsibleState.None);
-		item.contextValue = ResourceType.Message;
+		item.contextValue = this._contextValue ?? ContextValues.Message;
 		item.description = this._description;
 		item.tooltip = this._tooltip;
 		item.iconPath = this._iconPath;
@@ -52,7 +53,7 @@ export class CommandMessageNode extends MessageNode {
 					light: string | Uri;
 					dark: string | Uri;
 			  }
-			| ThemeIcon
+			| ThemeIcon,
 	) {
 		super(view, parent, message, description, tooltip, iconPath);
 	}
@@ -85,7 +86,7 @@ export class UpdateableMessageNode extends ViewNode {
 					light: string | Uri;
 					dark: string | Uri;
 			  }
-			| ThemeIcon
+			| ThemeIcon,
 	) {
 		super(unknownGitUri, view, parent);
 	}
@@ -97,7 +98,7 @@ export class UpdateableMessageNode extends ViewNode {
 	getTreeItem(): TreeItem | Promise<TreeItem> {
 		const item = new TreeItem(this._message, TreeItemCollapsibleState.None);
 		item.id = this.id;
-		item.contextValue = ResourceType.Message;
+		item.contextValue = ContextValues.Message;
 		item.tooltip = this._tooltip;
 		item.iconPath = this._iconPath;
 		return item;
@@ -117,7 +118,7 @@ export class UpdateableMessageNode extends ViewNode {
 				  }
 				| ThemeIcon;
 		},
-		view: View
+		view: View,
 	) {
 		if (changes.message !== undefined) {
 			this._message = changes.message;
@@ -140,22 +141,28 @@ export abstract class PagerNode extends ViewNode {
 		view: View,
 		parent: ViewNode & PageableViewNode,
 		protected readonly message: string,
-		private readonly _previousNode?: ViewNode,
-		private readonly _pageSize: number = Container.config.views.pageItemLimit
+		protected readonly previousNode?: ViewNode,
+		protected readonly pageSize: number = Container.config.views.pageItemLimit,
+		protected readonly countFn?: () => Promise<number | undefined>,
 	) {
 		super(unknownGitUri, view, parent);
 	}
 
-	showMore() {
-		return this.view.showMoreNodeChildren(
+	async loadAll() {
+		const count = (await this.countFn?.()) ?? 0;
+		return this.view.loadMoreNodeChildren(
 			this.parent! as ViewNode & PageableViewNode,
-			this._pageSize,
-			this._previousNode
+			count > 5000 ? 5000 : 0,
+			this.previousNode,
 		);
 	}
 
-	showAll() {
-		return this.view.showMoreNodeChildren(this.parent! as ViewNode & PageableViewNode, 0, this._previousNode);
+	loadMore() {
+		return this.view.loadMoreNodeChildren(
+			this.parent! as ViewNode & PageableViewNode,
+			this.pageSize,
+			this.previousNode,
+		);
 	}
 
 	getChildren(): ViewNode[] | Promise<ViewNode[]> {
@@ -164,40 +171,37 @@ export abstract class PagerNode extends ViewNode {
 
 	getTreeItem(): TreeItem | Promise<TreeItem> {
 		const item = new TreeItem(this.message, TreeItemCollapsibleState.None);
-		item.contextValue = ResourceType.Pager;
+		item.contextValue = ContextValues.Pager;
 		item.command = this.getCommand();
-		item.iconPath = {
-			dark: Container.context.asAbsolutePath('images/dark/icon-ellipsis.svg'),
-			light: Container.context.asAbsolutePath('images/light/icon-ellipsis.svg')
-		};
 		return item;
 	}
 
 	getCommand(): Command | undefined {
 		return {
-			title: 'Show More',
-			command: 'gitlens.views.showMoreChildren',
-			arguments: [this]
+			title: 'Load more',
+			command: 'gitlens.views.loadMoreChildren',
+			arguments: [this],
 		};
 	}
 }
 
-export class ShowMoreNode extends PagerNode {
+export class LoadMoreNode extends PagerNode {
 	constructor(
 		view: View,
 		parent: ViewNode & PageableViewNode,
-		itemType: string,
 		previousNode: ViewNode,
-		pageSize?: number
+		pageSize?: number,
+		countFn?: () => Promise<number | undefined>,
 	) {
 		super(
 			view,
 			parent,
 			pageSize === 0
-				? `Show All ${itemType} ${GlyphChars.Space}${GlyphChars.Dash}${GlyphChars.Space} this may take a while`
-				: `Show More ${itemType}`,
+				? `Load all ${GlyphChars.Space}${GlyphChars.Dash}${GlyphChars.Space} this may take a while`
+				: 'Load more',
 			previousNode,
-			pageSize
+			pageSize,
+			countFn,
 		);
 	}
 }

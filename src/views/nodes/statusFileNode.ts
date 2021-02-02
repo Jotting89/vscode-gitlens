@@ -1,15 +1,17 @@
 'use strict';
 import * as paths from 'path';
 import { Command, ThemeIcon, TreeItem, TreeItemCollapsibleState } from 'vscode';
-import { Commands, DiffWithPreviousCommandArgs } from '../../commands';
+import { Commands, DiffWithCommandArgs, DiffWithPreviousCommandArgs } from '../../commands';
 import { Container } from '../../container';
-import { GitFile, GitLogCommit, GitUri, StatusFileFormatter } from '../../git/gitService';
+import { FileRevisionAsCommitNode } from './fileRevisionAsCommitNode';
+import { FileNode } from './folderNode';
+import { GitFile, GitLogCommit, StatusFileFormatter } from '../../git/git';
+import { GitUri } from '../../git/gitUri';
 import { Strings } from '../../system';
-import { View } from '../viewBase';
-import { CommitFileNode } from './commitFileNode';
-import { ResourceType, ViewNode } from './viewNode';
+import { ViewsWithCommits } from '../viewBase';
+import { ContextValues, ViewNode } from './viewNode';
 
-export class StatusFileNode extends ViewNode {
+export class StatusFileNode extends ViewNode<ViewsWithCommits> implements FileNode {
 	public readonly commits: GitLogCommit[];
 	public readonly file: GitFile;
 	public readonly repoPath: string;
@@ -17,7 +19,7 @@ export class StatusFileNode extends ViewNode {
 	private readonly _hasStagedChanges: boolean;
 	private readonly _hasUnstagedChanges: boolean;
 
-	constructor(view: View, parent: ViewNode, repoPath: string, file: GitFile, commits: GitLogCommit[]) {
+	constructor(view: ViewsWithCommits, parent: ViewNode, repoPath: string, file: GitFile, commits: GitLogCommit[]) {
 		let hasStagedChanges = false;
 		let hasUnstagedChanges = false;
 		let ref = undefined;
@@ -61,7 +63,7 @@ export class StatusFileNode extends ViewNode {
 	}
 
 	getChildren(): ViewNode[] {
-		return this.commits.map(c => new CommitFileNode(this.view, this, this.file, c, { displayAsCommit: true }));
+		return this.commits.map(c => new FileRevisionAsCommitNode(this.view, this, this.file, c));
 	}
 
 	getTreeItem(): TreeItem {
@@ -69,20 +71,20 @@ export class StatusFileNode extends ViewNode {
 		item.description = this.description;
 
 		if ((this._hasStagedChanges || this._hasUnstagedChanges) && this.commits.length === 1) {
-			item.contextValue = ResourceType.File;
+			item.contextValue = ContextValues.File;
 			if (this._hasStagedChanges) {
 				item.contextValue += '+staged';
 				item.tooltip = StatusFileFormatter.fromTemplate(
 					// eslint-disable-next-line no-template-curly-in-string
 					'${file}\n${directory}/\n\n${status}${ (originalPath)} in Index (staged)',
-					this.file
+					this.file,
 				);
 			} else {
 				item.contextValue += '+unstaged';
 				item.tooltip = StatusFileFormatter.fromTemplate(
 					// eslint-disable-next-line no-template-curly-in-string
 					'${file}\n${directory}/\n\n${status}${ (originalPath)} in Working Tree',
-					this.file
+					this.file,
 				);
 			}
 
@@ -94,7 +96,7 @@ export class StatusFileNode extends ViewNode {
 		} else {
 			item.collapsibleState = TreeItemCollapsibleState.Collapsed;
 			if (this._hasStagedChanges || this._hasUnstagedChanges) {
-				item.contextValue = ResourceType.File;
+				item.contextValue = ContextValues.File;
 				if (this._hasStagedChanges && this._hasUnstagedChanges) {
 					item.contextValue += '+staged+unstaged';
 				} else if (this._hasStagedChanges) {
@@ -107,19 +109,21 @@ export class StatusFileNode extends ViewNode {
 				item.resourceUri = GitUri.resolveToUri(this.file.fileName, this.repoPath);
 				item.iconPath = ThemeIcon.File;
 			} else {
-				item.contextValue = ResourceType.StatusFileCommits;
+				item.contextValue = ContextValues.StatusFileCommits;
 
 				const icon = GitFile.getStatusIcon(this.file.status);
 				item.iconPath = {
 					dark: Container.context.asAbsolutePath(paths.join('images', 'dark', icon)),
-					light: Container.context.asAbsolutePath(paths.join('images', 'light', icon))
+					light: Container.context.asAbsolutePath(paths.join('images', 'light', icon)),
 				};
 			}
 
 			item.tooltip = StatusFileFormatter.fromTemplate(
 				`\${file}\n\${directory}/\n\n\${status}\${ (originalPath)} in ${this.getChangedIn()}`,
-				this.file
+				this.file,
 			);
+
+			item.command = this.getCommand();
 		}
 
 		// Only cache the label/description for a single refresh
@@ -131,16 +135,16 @@ export class StatusFileNode extends ViewNode {
 
 	private _description: string | undefined;
 	get description() {
-		if (this._description === undefined) {
+		if (this._description == null) {
 			this._description = StatusFileFormatter.fromTemplate(
-				this.view.config.statusFileDescriptionFormat,
+				this.view.config.formats.files.description,
 				{
 					...this.file,
-					commit: this.commit
+					commit: this.commit,
 				},
 				{
-					relativePath: this.relativePath
-				}
+					relativePath: this.relativePath,
+				},
 			);
 		}
 		return this._description;
@@ -148,7 +152,7 @@ export class StatusFileNode extends ViewNode {
 
 	private _folderName: string | undefined;
 	get folderName() {
-		if (this._folderName === undefined) {
+		if (this._folderName == null) {
 			this._folderName = paths.dirname(this.uri.relativePath);
 		}
 		return this._folderName;
@@ -156,16 +160,16 @@ export class StatusFileNode extends ViewNode {
 
 	private _label: string | undefined;
 	get label() {
-		if (this._label === undefined) {
+		if (this._label == null) {
 			this._label = StatusFileFormatter.fromTemplate(
-				this.view.config.statusFileFormat,
+				this.view.config.formats.files.label,
 				{
 					...this.file,
-					commit: this.commit
+					commit: this.commit,
 				},
 				{
-					relativePath: this.relativePath
-				}
+					relativePath: this.relativePath,
+				},
 			);
 		}
 		return this._label;
@@ -222,18 +226,45 @@ export class StatusFileNode extends ViewNode {
 	}
 
 	getCommand(): Command | undefined {
-		const commandArgs: DiffWithPreviousCommandArgs = {
-			commit: this.commit,
+		if ((this._hasStagedChanges || this._hasUnstagedChanges) && this.commits.length === 1) {
+			const commandArgs: DiffWithPreviousCommandArgs = {
+				commit: this.commit,
+				uri: GitUri.fromFile(this.file, this.repoPath),
+				line: 0,
+				showOptions: {
+					preserveFocus: true,
+					preview: true,
+				},
+			};
+			return {
+				title: 'Open Changes with Previous Revision',
+				command: Commands.DiffWithPrevious,
+				arguments: [undefined, commandArgs],
+			};
+		}
+
+		const commit = this.commits[this.commits.length - 1];
+		const file = commit.findFile(this.file.fileName)!;
+		const commandArgs: DiffWithCommandArgs = {
+			lhs: {
+				sha: `${commit.sha}^`,
+				uri: GitUri.fromFile(file, this.repoPath, undefined, true),
+			},
+			rhs: {
+				sha: '',
+				uri: GitUri.fromFile(this.file, this.repoPath),
+			},
+			repoPath: this.repoPath,
 			line: 0,
 			showOptions: {
 				preserveFocus: true,
-				preview: true
-			}
+				preview: true,
+			},
 		};
 		return {
-			title: 'Compare File with Previous Revision',
-			command: Commands.DiffWithPrevious,
-			arguments: [GitUri.fromFile(this.file, this.repoPath), commandArgs]
+			title: 'Open Changes',
+			command: Commands.DiffWith,
+			arguments: [commandArgs],
 		};
 	}
 }

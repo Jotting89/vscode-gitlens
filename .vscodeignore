@@ -1,13 +1,17 @@
 .github/**
 .vscode/**
-dist/webviews/main.js
+.vscode-clean/**
+.yarn/**
+dist/webviews/*.css
 emoji/**
 images/docs/**
-images/**/*.pdn
 node_modules/**
+scripts/**
 src/**
 test/**
-*.map
+**/*.fig
+**/*.pdn
+.eslintcache
 .eslintignore
 .eslintrc.json
 .gitattributes
@@ -23,5 +27,6 @@ generateEmojiShortcodeMap.js
 tsconfig.eslint.json
 tsconfig.json
 tsconfig.webviews.json
+tsconfig.tsbuildinfo
 webpack.config.js
 yarn.lock

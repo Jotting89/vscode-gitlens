@@ -1,16 +1,17 @@
 'use strict';
-import { TreeItem, TreeItemCollapsibleState } from 'vscode';
+import { TreeItem, TreeItemCollapsibleState, window } from 'vscode';
+import { CommitNode } from './commitNode';
+import { LoadMoreNode, MessageNode } from './common';
 import { GlyphChars } from '../../constants';
 import { Container } from '../../container';
-import { GitLog, GitReflogRecord, GitUri } from '../../git/gitService';
-import { debug, gate, Iterables } from '../../system';
-import { ViewWithFiles } from '../viewBase';
-import { CommitNode } from './commitNode';
-import { MessageNode, ShowMoreNode } from './common';
-import { PageableViewNode, ResourceType, ViewNode } from './viewNode';
+import { GitLog, GitReflogRecord } from '../../git/git';
+import { GitUri } from '../../git/gitUri';
 import { RepositoryNode } from './repositoryNode';
+import { debug, gate, Iterables } from '../../system';
+import { ViewsWithCommits } from '../viewBase';
+import { ContextValues, PageableViewNode, ViewNode } from './viewNode';
 
-export class ReflogRecordNode extends ViewNode<ViewWithFiles> implements PageableViewNode {
+export class ReflogRecordNode extends ViewNode<ViewsWithCommits> implements PageableViewNode {
 	static key = ':reflog-record';
 	static getId(
 		repoPath: string,
@@ -18,13 +19,14 @@ export class ReflogRecordNode extends ViewNode<ViewWithFiles> implements Pageabl
 		selector: string,
 		command: string,
 		commandArgs: string | undefined,
-		date: Date
+		date: Date,
 	): string {
-		return `${RepositoryNode.getId(repoPath)}${this.key}(${sha}|${selector}|${command}|${commandArgs ||
-			''}|${date.getTime()})`;
+		return `${RepositoryNode.getId(repoPath)}${this.key}(${sha}|${selector}|${command}|${
+			commandArgs ?? ''
+		}|${date.getTime()})`;
 	}
 
-	constructor(view: ViewWithFiles, parent: ViewNode, public readonly record: GitReflogRecord) {
+	constructor(view: ViewsWithCommits, parent: ViewNode, public readonly record: GitReflogRecord) {
 		super(GitUri.fromRepoPath(record.repoPath), view, parent);
 	}
 
@@ -35,7 +37,7 @@ export class ReflogRecordNode extends ViewNode<ViewWithFiles> implements Pageabl
 			this.record.selector,
 			this.record.command,
 			this.record.commandArgs,
-			this.record.date
+			this.record.date,
 		);
 	}
 
@@ -43,12 +45,12 @@ export class ReflogRecordNode extends ViewNode<ViewWithFiles> implements Pageabl
 		const log = await this.getLog();
 		if (log === undefined) return [new MessageNode(this.view, this, 'No commits could be found.')];
 
-		const children: (CommitNode | ShowMoreNode)[] = [
-			...Iterables.map(log.commits.values(), c => new CommitNode(this.view, this, c))
+		const children: (CommitNode | LoadMoreNode)[] = [
+			...Iterables.map(log.commits.values(), c => new CommitNode(this.view, this, c)),
 		];
 
 		if (log.hasMore) {
-			children.push(new ShowMoreNode(this.view, this, 'Commits', children[children.length - 1]));
+			children.push(new LoadMoreNode(this.view, this, children[children.length - 1]));
 		}
 		return children;
 	}
@@ -56,7 +58,7 @@ export class ReflogRecordNode extends ViewNode<ViewWithFiles> implements Pageabl
 	getTreeItem(): TreeItem {
 		const item = new TreeItem(
 			`${this.record.command}${this.record.commandArgs ? ` ${this.record.commandArgs}` : ''}`,
-			TreeItemCollapsibleState.Collapsed
+			TreeItemCollapsibleState.Collapsed,
 		);
 		item.id = this.id;
 		item.description = `${
@@ -64,7 +66,7 @@ export class ReflogRecordNode extends ViewNode<ViewWithFiles> implements Pageabl
 				? ''
 				: `${this.record.HEAD} ${GlyphChars.Space}${GlyphChars.Dot}${GlyphChars.Space} `
 		}${this.record.formattedDate}`;
-		item.contextValue = ResourceType.ReflogRecord;
+		item.contextValue = ContextValues.ReflogRecord;
 		item.tooltip = `${this.record.HEAD.length === 0 ? '' : `${this.record.HEAD}\n`}${this.record.command}${
 			this.record.commandArgs ? ` ${this.record.commandArgs}` : ''
 		}${
@@ -90,7 +92,7 @@ export class ReflogRecordNode extends ViewNode<ViewWithFiles> implements Pageabl
 			const range = `${this.record.previousSha}..${this.record.sha}`;
 			this._log = await Container.git.getLog(this.uri.repoPath!, {
 				limit: this.limit ?? this.view.config.defaultItemLimit,
-				ref: range
+				ref: range,
 			});
 		}
 
@@ -102,8 +104,14 @@ export class ReflogRecordNode extends ViewNode<ViewWithFiles> implements Pageabl
 	}
 
 	limit: number | undefined = this.view.getNodeLastKnownLimit(this);
-	async showMore(limit?: number | { until?: any }) {
-		let log = await this.getLog();
+	@gate()
+	async loadMore(limit?: number | { until?: any }) {
+		let log = await window.withProgress(
+			{
+				location: { viewId: this.view.id },
+			},
+			() => this.getLog(),
+		);
 		if (log === undefined || !log.hasMore) return;
 
 		log = await log.more?.(limit ?? this.view.config.pageItemLimit);
@@ -111,6 +119,6 @@ export class ReflogRecordNode extends ViewNode<ViewWithFiles> implements Pageabl
 
 		this._log = log;
 		this.limit = log?.count;
-		this.triggerChange(false);
+		void this.triggerChange(false);
 	}
 }
