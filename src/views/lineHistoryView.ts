@@ -1,22 +1,28 @@
 'use strict';
 import { commands, ConfigurationChangeEvent } from 'vscode';
-import { configuration, LineHistoryViewConfig, ViewsConfig } from '../configuration';
-import { CommandContext, setCommandContext } from '../constants';
+import { configuration, LineHistoryViewConfig } from '../configuration';
+import { ContextKeys, setContext } from '../constants';
 import { Container } from '../container';
 import { LineHistoryTrackerNode } from './nodes';
 import { ViewBase } from './viewBase';
 
-export class LineHistoryView extends ViewBase<LineHistoryTrackerNode> {
+const pinnedSuffix = ' (pinned)';
+
+export class LineHistoryView extends ViewBase<LineHistoryTrackerNode, LineHistoryViewConfig> {
+	protected readonly configKey = 'lineHistory';
+
 	constructor() {
 		super('gitlens.views.lineHistory', 'Line History');
+
+		void setContext(ContextKeys.ViewsLineHistoryEditorFollowing, true);
+	}
+
+	protected get showCollapseAll(): boolean {
+		return false;
 	}
 
 	getRoot() {
 		return new LineHistoryTrackerNode(this);
-	}
-
-	protected get location(): string {
-		return this.config.location;
 	}
 
 	protected registerCommands() {
@@ -25,76 +31,68 @@ export class LineHistoryView extends ViewBase<LineHistoryTrackerNode> {
 		commands.registerCommand(
 			this.getQualifiedCommand('copy'),
 			() => commands.executeCommand('gitlens.views.copy', this.selection),
-			this
+			this,
 		);
 		commands.registerCommand(this.getQualifiedCommand('refresh'), () => this.refresh(true), this);
 		commands.registerCommand(this.getQualifiedCommand('changeBase'), () => this.changeBase(), this);
 		commands.registerCommand(
 			this.getQualifiedCommand('setEditorFollowingOn'),
 			() => this.setEditorFollowing(true),
-			this
+			this,
 		);
 		commands.registerCommand(
 			this.getQualifiedCommand('setEditorFollowingOff'),
 			() => this.setEditorFollowing(false),
-			this
+			this,
 		);
-		commands.registerCommand(
-			this.getQualifiedCommand('setRenameFollowingOn'),
-			() => this.setRenameFollowing(true),
-			this
-		);
-		commands.registerCommand(
-			this.getQualifiedCommand('setRenameFollowingOff'),
-			() => this.setRenameFollowing(false),
-			this
-		);
+		commands.registerCommand(this.getQualifiedCommand('setShowAvatarsOn'), () => this.setShowAvatars(true), this);
+		commands.registerCommand(this.getQualifiedCommand('setShowAvatarsOff'), () => this.setShowAvatars(false), this);
 	}
 
-	protected onConfigurationChanged(e: ConfigurationChangeEvent) {
+	protected filterConfigurationChanged(e: ConfigurationChangeEvent) {
+		const changed = super.filterConfigurationChanged(e);
 		if (
-			!configuration.changed(e, 'views', 'lineHistory') &&
-			!configuration.changed(e, 'views') &&
+			!changed &&
 			!configuration.changed(e, 'defaultDateFormat') &&
+			!configuration.changed(e, 'defaultDateShortFormat') &&
 			!configuration.changed(e, 'defaultDateSource') &&
 			!configuration.changed(e, 'defaultDateStyle') &&
 			!configuration.changed(e, 'defaultGravatarsStyle') &&
-			!configuration.changed(e, 'advanced', 'fileHistoryFollowsRenames')
+			!configuration.changed(e, 'defaultTimeFormat')
 		) {
-			return;
+			return false;
 		}
 
-		if (configuration.changed(e, 'views', 'lineHistory', 'enabled')) {
-			setCommandContext(CommandContext.ViewsLineHistoryEditorFollowing, true);
+		return true;
+	}
+
+	private changeBase() {
+		void this.root?.changeBase();
+	}
+
+	private setEditorFollowing(enabled: boolean) {
+		const root = this.ensureRoot();
+		if (!root.hasUri) return;
+
+		void setContext(ContextKeys.ViewsLineHistoryEditorFollowing, enabled);
+
+		this.root?.setEditorFollowing(enabled);
+
+		if (this.description?.endsWith(pinnedSuffix)) {
+			if (enabled) {
+				this.description = this.description.substr(0, this.description.length - pinnedSuffix.length);
+			}
+		} else if (!enabled && this.description != null) {
+			this.description += pinnedSuffix;
 		}
 
-		if (configuration.changed(e, 'views', 'lineHistory', 'location')) {
-			this.initialize(this.config.location);
-		}
-
-		if (!configuration.initializing(e) && this._root !== undefined) {
+		if (enabled) {
+			void root.ensureSubscription();
 			void this.refresh(true);
 		}
 	}
 
-	get config(): ViewsConfig & LineHistoryViewConfig {
-		return { ...Container.config.views, ...Container.config.views.lineHistory };
-	}
-
-	private changeBase() {
-		if (this._root !== undefined) {
-			void this._root.changeBase();
-		}
-	}
-
-	private setEditorFollowing(enabled: boolean) {
-		setCommandContext(CommandContext.ViewsLineHistoryEditorFollowing, enabled);
-		if (this._root !== undefined) {
-			this._root.setEditorFollowing(enabled);
-		}
-	}
-
-	private setRenameFollowing(enabled: boolean) {
-		return configuration.updateEffective('advanced', 'fileHistoryFollowsRenames', enabled);
+	private setShowAvatars(enabled: boolean) {
+		return configuration.updateEffective('views', this.configKey, 'avatars', enabled);
 	}
 }

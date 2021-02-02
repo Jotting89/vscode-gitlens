@@ -4,6 +4,498 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](http://keepachangelog.com/) and this project adheres to [Semantic Versioning](http://semver.org/).
 
+## [11.2.0] - 2021-02-02
+
+### Added
+
+- Adds rebase and/or merge status when applicable to the _Commits_ and _Repositories_ views
+  - **Merging into &lt;branch&gt;** or **Resolve conflicts before merging into &lt;branch&gt;** &mdash; lists any conflicted files. Conflicted files show comparisons with the common base of the current and incoming changes to aid in resolving the conflict by making it easier to see where changes originated
+    ![Merging](https://raw.githubusercontent.com/eamodio/vscode-gitlens/main/images/docs/commits-view-merge.png)
+  - **Rebasing &lt;branch&gt;** or **Resolve conflicts to continue rebasing &lt;branch&gt;** &mdash; shows the number of rebase steps left, the commit the rebase is paused at, and lists any conflicted files. Conflicted files show comparisons with the common base of the current and incoming changes to aid in resolving the conflict by making it easier to see where changes originated
+    ![Rebasing](https://raw.githubusercontent.com/eamodio/vscode-gitlens/main/images/docs/commits-view-rebase.png)
+- Adds rebase and/or merge conflict status when applicable to the _File History_ and _Line History_ views
+  - **Merge Changes** &mdash; show comparisons with the common base of the current and incoming changes to aid in resolving the conflict by making it easier to see where changes originated
+    ![Merge Conflicts](https://raw.githubusercontent.com/eamodio/vscode-gitlens/main/images/docs/file-history-view-merge-conflict.png)
+- Adds status indicator colors to pull request icons in GitLens views
+- Adds a new _Quick Open File History_ command to all places where _Open File History_ already exists &mdash; closes [#1156](https://github.com/eamodio/vscode-gitlens/issues/1156)
+- Adds the _Add Remote_ command to the branch status in the _Branches_, _Commits_, and _Repositories_ views when there are no Git remotes configured
+- Adds a new _Browse Repository from Before Here_ (`gitlens.browseRepoBeforeRevision`) and _Browse Repository from Before Here in New Window_ (`gitlens.browseRepoBeforeRevisionInNewWindow`) commands
+- Adds _Repository from Before Here_ and _Repository from Before Here in New Window_ to the _Browse_ submenu of commits in the views
+- Adds a new _Copy Current Branch Name_ (`gitlens.copyCurrentBranch`) command to copy the current branch name to the clipboard &mdash; closes [#1306](https://github.com/eamodio/vscode-gitlens/issues/1306) &mdash; thanks to [PR #1307](https://github.com/eamodio/vscode-gitlens/pull/1307) by Ken Hom ([@kh0m](https://github.com/kh0m))
+- Adds a _Switch to Text_ button on the _Interactive Rebase Editor_ to open the text rebase todo file &mdash; note that closing either document will start the rebase
+- Adds a notification which asks if you want to create a pull request after publishing a new branch
+- Adds CodeStream partnership
+- Adds a `gitlens.views.branches.reveal` setting to specify whether to reveal branches in the _Branches_ view, otherwise they will be revealed in the _Repositories_ view
+- Adds a `gitlens.views.commits.reveal` setting to specify whether to reveal commits in the _Commits_ view, otherwise they will be revealed in the _Repositories_ view
+- Adds a `gitlens.views.remotes.reveal` setting to specify whether to reveal remotes in the _Remotes_ view, otherwise they will be revealed in the _Repositories_ view
+- Adds a `gitlens.views.stashes.reveal` setting to specify whether to reveal stashes in the _Stashes_ view, otherwise they will be revealed in the _Repositories_ view
+- Adds a `gitlens.views.tags.reveal` setting to specify whether to reveal tags in the _Tags_ view, otherwise they will be revealed in the _Repositories_ view
+- Adds a `gitlens.advanced.abbreviateShaOnCopy` setting to specify to whether to copy full or abbreviated commit SHAs to the clipboard. Abbreviates to the length of `gitlens.advanced.abbreviatedShaLength` &mdash; closes [#1062](https://github.com/eamodio/vscode-gitlens/issues/1062) &mdash; thanks to [PR #1316](https://github.com/eamodio/vscode-gitlens/pull/1316) by Brendon Smith ([@br3ndonland](https://github.com/br3ndonland))
+- Adds a `gitlens.advanced.externalDiffTool` setting to specify an optional external diff tool to use when comparing files. Must be a configured [Git difftool](https://git-scm.com/docs/git-config#Documentation/git-config.txt-difftool).
+- Adds a `gitlens.advanced.externalDirectoryDiffTool` setting to specify an optional external diff tool to use when comparing directories. Must be a configured [Git difftool](https://git-scm.com/docs/git-config#Documentation/git-config.txt-difftool).
+- Adds a new `regex` option to `gitlens.remotes` to better support custom remote matching &mdash; closes [#1196](https://github.com/eamodio/vscode-gitlens/issues/1196)
+
+### Changed
+
+- Changes `gitlens.statusBar.reduceFlicker` to be on by default and improves it's display &mdash; closes [#1353](https://github.com/eamodio/vscode-gitlens/issues/1353)
+- Changes the _Interactive Rebase Editor_ to abort the rebase if you just close it without choosing an action
+- Changes _Push to Commit..._ on the HEAD commit to be _Push_ instead as there is no need for a commit specific push in that case
+- Renames _Browse from Here_ command to _Browse Repository from Here_ in the command palette and quick pick menus
+- Renames _Browse from Here in New Window_ command to _Browse Repository from Here in New Window_ in the command palette and quick pick menus
+- Renames _Browse from Here_ to _Repository from Here_ on the _Browse_ submenu of commits in the views
+- Renames _Browse from Here in New Window_ to _Repository from Here in New Window_ on the _Browse_ submenu of commits in the views
+
+### Fixed
+
+- Fixes [#1267](https://github.com/eamodio/vscode-gitlens/issues/1267) - File history fails on Git for Windows 2.27 ("There are no editors open that can provide file history information.")
+- Fixes [#1006](https://github.com/eamodio/vscode-gitlens/issues/1006) - "GitLens: Open File on Remote" opens wrong Bitbucket URL
+- Fixes [#901](https://github.com/eamodio/vscode-gitlens/issues/901) - Bitbucket Server fails when url = https://DOMAIN/stash/scm/PROJECT/REPO.git
+- Fixes [#1354](https://github.com/eamodio/vscode-gitlens/issues/1354) - Stuck after merge a branch with a single quote in the name
+- Fixes [#863](https://github.com/eamodio/vscode-gitlens/issues/863) - Pulling all repositories doesn't work unless built-in Git knows about the repo (requires VS Code v1.53 or later)
+- Fixes [#1332](https://github.com/eamodio/vscode-gitlens/issues/1332) - Stashes created with command line don't show up in the "Stashes" section
+- Fixes [#1045](https://github.com/eamodio/vscode-gitlens/issues/1045) - View File History not working - absolute path used &mdash; thanks to [PR #1334](https://github.com/eamodio/vscode-gitlens/pull/1334) by egfx-notifications ([@egfx-notifications](https://github.com/egfx-notifications))
+- Fixes [#1323](https://github.com/eamodio/vscode-gitlens/issues/1323) - Interactive rebase hangs
+- Fixes [#1183](https://github.com/eamodio/vscode-gitlens/issues/1183) - stash all changes has no effect when the number of files is large
+- Fixes [#1308](https://github.com/eamodio/vscode-gitlens/issues/1308) - Escape quotes for PRs titles
+- Fixes [#1309](https://github.com/eamodio/vscode-gitlens/issues/1309) - "Fetch" not working on remote branches
+- Fixes an issue where many views wouldn't refresh properly when going from no items to some items
+- Fixes an issue where _Publish Branch_ was incorrectly showing up on remote branches
+- Fixes an issue where the _Open Directory Compare \*_ commands failed to work
+- Fixes an issue where pinning a file/line to the _File History_ view or _Line History_ view would get lost if the view was collapsed and expanded
+
+### Removed
+
+- Removes the `gitlens.repositories.enabled` setting, since the view is toggleable as any other view now
+- Removes the `gitlens.lineHistory.enabled` setting, since the view is toggleable as any other view now
+- Removes the _Hide Repositories view_ command, since the view is toggleable as any other view now
+- Removes the _Hide Line History view_ command, since the view is toggleable as any other view now
+
+## [11.1.3] - 2021-01-05
+
+### Fixed
+
+- Fixes [#1303](https://github.com/eamodio/vscode-gitlens/issues/1303) - Open on Remote is creating invalid URLs for Azure Devops &mdash; thanks to [PR #1304](https://github.com/eamodio/vscode-gitlens/pull/1304) by Travis Collins ([@TravisTX](https://github.com/TravisTX))
+
+## [11.1.2] - 2021-01-03
+
+### Fixed
+
+- Fixes the outdated documentation url on the _Connect Remote Provider_ quick pick menu &mdash; thanks to [PR #1300](https://github.com/eamodio/vscode-gitlens/pull/1300) by Ahmadou Waly NDIAYE ([@sir-kain](https://github.com/sir-kain))
+
+## [11.1.1] - 2021-01-02
+
+### Changes
+
+- Improves the performance of the _Stashes_ and _Contributors_ views
+
+### Fixed
+
+- Fixes [#1302](https://github.com/eamodio/vscode-gitlens/issues/1302) - Welcome screen on every editor window is very tedious
+- Fixes [#1285](https://github.com/eamodio/vscode-gitlens/issues/1285) - Uncommitted staged changes after pull
+- Fixes [#1294](https://github.com/eamodio/vscode-gitlens/issues/1294) - Error when open commits list
+
+## [11.1.0] - 2020-12-23
+
+### Added
+
+- Refines the _Repositories_ view to better align its features with all the new views
+  - Adds menu toggles and the settings below to allow for far greater customization of the sections in the _Repositories_ view
+  - Adds a `gitlens.views.repositories.branches.showBranchComparison` setting to specify whether to show a comparison of the branch with a user-selected reference (branch, tag. etc) under under each branch in the _Repositories_ view
+  - Adds a `gitlens.views.repositories.showBranches` setting to specify whether to show the branches for each repository
+  - Adds a `gitlens.views.repositories.showCommits` setting to specify whether to show the commits on the current branch for each repository
+  - Adds a `gitlens.views.repositories.showContributors` setting to specify whether to show the contributors for each repository
+  - Adds a `gitlens.views.repositories.showIncomingActivity` setting to specify whether to show the experimental incoming activity for each repository
+  - Adds a `gitlens.views.repositories.showRemotes` setting to specify whether to show the remotes for each repository
+  - Adds a `gitlens.views.repositories.showStashes` setting to specify whether to show the stashes for each repository
+  - Adds a `gitlens.views.repositories.showTags` setting to specify whether to show the tags for each repository
+  - Adds a `gitlens.views.repositories.showUpstreamStatus` setting to specify whether to show the upstream status of the current branch for each repository
+  - Adds all of the settings above to the _Repositories_ view section in the GitLens Interactive Settings
+- Adds better visibility to the, hidden by default, _Repositories_ and _Line History_ views
+  - Adds a _Repositories_ view toggle command to the _Commits_ view's context menu
+  - Adds a _Line History_ view toggle command to the _File History_ view's context menu
+  - Re-adds the _Line History_ view settings to the GitLens Interactive Settings
+- Adds usage-based sorting (on by default) to the _Git Command Palette_
+  - Adds a `gitlens.gitCommands.sortBy` setting to specify how Git commands are sorted in the _Git Command Palette_
+- Adds ability to show gutter heatmap in the gutter and/or on the scroll bar &mdash; closes [#297](https://github.com/eamodio/vscode-gitlens/issues/297)
+  - Adds a `gitlens.heatmap.locations` setting to specify where the indicators of the gutter heatmap annotations will be shown
+- Adds a `gitlens.fileAnnotations.command` setting to specify whether the file annotations button in the editor title shows a menu or immediately toggles the specified file annotations &mdash; closes [#1165](https://github.com/eamodio/vscode-gitlens/issues/1165) thanks to [PR #1171](https://github.com/eamodio/vscode-gitlens/pull/1171) by Raaj Patil ([@arrpee](https://github.com/arrpee))
+  - Adds this new option to the _Menus & Toolbars_ section of the GitLens Interactive Settings
+- Adds a _Push to Commit..._ command to unpublished commits in the _Commits_, _Branches_, and _Repositories_ views, and to to unpublished files in the _File History_ and _Line History_ views
+- Adds a _Commit_ submenu to files in the _File History_ and _Line History_ views &mdash; closes [#1044](https://github.com/eamodio/vscode-gitlens/issues/1044)
+- Adds an _Open File on Remote From..._ command (`gitlens.openFileOnRemoteFrom`) to open a file or revision on a specific branch or tag on the remote provider &mdash; closes [#1071](https://github.com/eamodio/vscode-gitlens/issues/1071)
+- Adds a _Copy Remote File Url From..._ command (`gitlens.copyRemoteFileUrlFrom`) to copy the url of a file or revision on a specific branch or tag the remote provider &mdash; closes [#1071](https://github.com/eamodio/vscode-gitlens/issues/1071)
+- Adds a welcome, i.e. richer empty state, to the _Search & Compare_ view
+- Adds dynamic updating of the last fetched date/time in the _Commits_ and _Repositories_ views
+- Adds a _Connect to Remote_ command (`gitlens.connectRemoteProvider`) to connect to a supported remote service to enable a rich integration
+- Adds a _Disconnect from Remote_ command (`gitlens.disconnectRemoteProvider`) to disconnect from a connected remote service
+- Adds a `gitlens.integrations.enabled` setting to specify whether to enable rich integrations with any supported remote services &mdash; see [#1208](https://github.com/eamodio/vscode-gitlens/issues/1208)
+- Adds a `gitlens.terminalLinks.enabled` setting to specify whether to enable terminal links &mdash; autolinks in the integrated terminal to quickly jump to more details for commits, branches, tags, and more &mdash; closes [#1284](https://github.com/eamodio/vscode-gitlens/issues/1284)
+- Adds a `gitlens.defaultTimeFormat` setting to specify how times will be formatted by default
+- Adds a `gitlens.showWelcomeOnInstall` setting to specify whether to show the Welcome (Quick Setup) experience on first install &mdash; closes [#1049](https://github.com/eamodio/vscode-gitlens/issues/1049) thanks to [PR #1258](https://github.com/eamodio/vscode-gitlens/pull/1258) by Rickard ([@rickardp](https://github.com/rickardp))
+- Adds a ⭐ star as a favorite indicator on branches in the quick pick menus
+- Adds ability to toggle the _Toggle Compare with: Working Tree / Branch_ command before a comparision is chosen
+- Adds GitLens extensibility APIs
+  - Adds an _action runner_ extensibility point to provide a runner (handler) for the new _createPullRequest_ and _openPullRequest_ actions &mdash; see [`gitlens.d.ts`](https://github.com/eamodio/vscode-gitlens/blob/main/src/api/gitlens.d.ts) for API definitions
+
+### Changed
+
+- Changes the _Incoming Activity_ section of the _Repositories_ view to be hidden by default, as it is still experimental
+- Changes the options on the _Git Command Palette_'s _revert_ command to now be _Revert_ (`--no-edit`) and _Revert & Edit_ (`--edit`) &mdash; closes [#1269](https://github.com/eamodio/vscode-gitlens/issues/1269)
+- Changes the thickness (boldness) of a handful of icons to better match VS Code codicons
+
+### Fixed
+
+- Fixes [#1016](https://github.com/eamodio/vscode-gitlens/issues/1016) - "Last fetched" message is also updated when fetch failed
+- Fixes [#1218](https://github.com/eamodio/vscode-gitlens/issues/1218) - Opening Ahead/Behind files isn't showing the desire diff (e.g. diff with the merge base)
+- Fixes [#1255](https://github.com/eamodio/vscode-gitlens/issues/1255) - Repository folders are missing repository actions (e.g. favorites, close repo, etc)
+- Fixes [#1246](https://github.com/eamodio/vscode-gitlens/issues/1246) - Gutter Blame avatar does not use Gravatar fallback style
+- Fixes [#1208](https://github.com/eamodio/vscode-gitlens/issues/1208) - Connect to Github notification is noisy
+- Fixes [#526](https://github.com/eamodio/vscode-gitlens/issues/526) - FAILED in gitlens.outputLevel=verbose; likely due to regex not in quotes
+- Fixes [#1222](https://github.com/eamodio/vscode-gitlens/issues/1222) - GitLens: Open Associated Pull Request doesn't work
+- Fixes [#1223](https://github.com/eamodio/vscode-gitlens/issues/1223) - commit pane, ${tips} does not show tags
+- Fixes [#1225](https://github.com/eamodio/vscode-gitlens/issues/1225) - Changes hover is wrong if the original/new line number doesn't match
+- Fixes [#1045](https://github.com/eamodio/vscode-gitlens/issues/1045) - View File History not working - absolute path used &mdash; thanks to [PR #1209](https://github.com/eamodio/vscode-gitlens/pull/1209) by Mike Surcouf ([@mikes-gh](https://github.com/mikes-gh))
+- Fixes [#1087](https://github.com/eamodio/vscode-gitlens/issues/1087) - Error retrieving line history from UNC path &mdash; thanks to [PR #1209](https://github.com/eamodio/vscode-gitlens/pull/1209) by Mike Surcouf ([@mikes-gh](https://github.com/mikes-gh))
+- Fixes [#1176](https://github.com/eamodio/vscode-gitlens/issues/1176) - Can't selectively apply stash
+- Fixes [#1212](https://github.com/eamodio/vscode-gitlens/issues/1212) - Stashes list doesn't refresh on deletion
+- Fixes [#1191](https://github.com/eamodio/vscode-gitlens/issues/1191) - "Gitlens › Views › Repositories: Auto Refresh" not working
+- Fixes [#1202](https://github.com/eamodio/vscode-gitlens/issues/1202) - "Copy Remote File Url" url-encodes the URL
+- Fixes an issue where _Gutter \*_ file annotations wouldn't dynamically update when changing certain default configuration settings
+- Fixes an issue where `git shortlog` could hang (when there is no HEAD)
+- Fixes an issue where _GitLens: Show Repositories View_ command wouldn't work unless the view was enabled first
+- Fixes an issue where _GitLens: Show Line History View_ command wasn't showing up unless the view was enabled first
+- Fixes an issue where trying to force push the current branch would fail
+- Fixes an issue where _Push to Commit..._ would incorrectly show a repository picker
+- Fixes an issue where the _Add Remote_ command wasn't working
+- Fixes an issue where the `gitlens.sortBranchesBy` and `gitlens.sortTagsBy` settings where not honored in many quick pick menus
+- Fixes an issue where the _Toggle Compare with: Working Tree / Branch_ command was showing incorrectly on the branch comparisons
+
+## [11.0.6] - 2020-11.28
+
+### Changed
+
+- Changes the _Where did my views go?_ view to show on this next upgrade, since somehow (still not sure how) it was never shown to many (most?) users
+- Changes GitHub connection rejection to be per-workspace (rather than global)
+
+### Fixed
+
+- Fixes [#1205](https://github.com/eamodio/vscode-gitlens/issues/1205) - Setting heatmap's `coldColor` and `hotColor` breaks file blame & related functionality
+- Fixes invalid branch status showing up for remote branches
+
+## [11.0.5] - 2020-11-23
+
+### Fixed
+
+- Fixes [#1204](https://github.com/eamodio/vscode-gitlens/issues/1204) - Compare file changes: "new" and "old" sides of the compare are backwards
+
+## [11.0.4] - 2020-11-22
+
+### Fixed
+
+- Fixes [#1161](https://github.com/eamodio/vscode-gitlens/issues/1161) - Compare file differences between branches
+- Fixes [#1157](https://github.com/eamodio/vscode-gitlens/issues/1157) - GitLens report `X files changed` when comparing working tree with a branch having identical files
+
+## [11.0.3] - 2020-11-22
+
+### Fixed
+
+- Fixes [#1163](https://github.com/eamodio/vscode-gitlens/issues/1163) - Use Interactive Rebase Editor when run from GitLens command (regardless of Git config)
+- Fixes [#1197](https://github.com/eamodio/vscode-gitlens/issues/1197) - Can't squash commit in interactive rebase editor
+- Fixes the `gitlens.codeLens.scopes` setting json schema
+
+## [11.0.2] - 2020-11-20
+
+### Added
+
+- Adds a quick-access button to the _Interactive Rebase Editor_ to disable it &mdash; closes [#1153](https://github.com/eamodio/vscode-gitlens/issues/1153)
+- Adds shortcut keys to start and abort a rebase in the _Interactive Rebase Editor_
+- Adds a _Disable Interactive Rebase Editor_ command (`gitlens.disableRebaseEditor`) to disable the interactive rebase editor
+- Adds an _Enable Interactive Rebase Editor_ command (`gitlens.enableRebaseEditor`) to enable the interactive rebase editor
+- Adds an _Interactive Rebase Editor_ section to the GitLens Interactive Settings
+
+### Changes
+
+- Changes the layout spacing of the _Interactive Rebase Editor_ to allow for more commits to be shown at once
+
+### Fixed
+
+- Fixes [#1187](https://github.com/eamodio/vscode-gitlens/issues/1187) - Warning about incorrect regexp in DevTools console &mdash; thanks to [PR #1188](https://github.com/eamodio/vscode-gitlens/pull/1188) by Andrii Dieiev ([@IllusionMH](https://github.com/IllusionMH))
+- Fixes [#1151](https://github.com/eamodio/vscode-gitlens/issues/1151) - Icons not showing in interactive rebase
+- Fixes [#1166](https://github.com/eamodio/vscode-gitlens/issues/1166) - Enormous avatars in interactive rebase view
+
+## [11.0.1] - 2020-11-16
+
+### Added
+
+- Adds a _Compare References..._ command (`gitlens.compareWith`) to compare two selected references
+- Adds ability to enter reference ranges (e.g. `main...release/1.0`) to the _Git Command Palette_'s _history_ command
+
+### Fixed
+
+- Fixes [#1148](https://github.com/eamodio/vscode-gitlens/issues/1148) - Follow renames on File History cannot load more history
+- Fixes [#1157](https://github.com/eamodio/vscode-gitlens/issues/1157) - GitLens report `X files changed` when comparing working tree with a branch having identical files
+- Fixes [#1150](https://github.com/eamodio/vscode-gitlens/issues/1150) - Cannot read property 'provider' of undefined
+
+## [11.0.0] - 2020-11-14
+
+### Added
+
+- Adds all-new views side bar views
+
+  - Moves all GitLens views to the _Source Control_ side bar by default. You can move them back to the _GitLens_ side bar via the _Set Views Layout_ (`gitlens.setViewsLayout`) command or individually via drag and drop
+
+  - [**_Commits_ view**](https://github.com/eamodio/vscode-gitlens#commits-view-) &mdash; visualize, explore, and manage Git commits
+
+    ![Commits view](https://raw.githubusercontent.com/eamodio/vscode-gitlens/main/images/docs/commits-view.png)
+
+    - Adds an indicator icon (up arrow) to unpublished (unpushed) commits
+
+  - [**_Branches_ view**](https://github.com/eamodio/vscode-gitlens#branches-view-) &mdash; visualize, explore, and manage Git branches
+
+    ![Branches view](https://raw.githubusercontent.com/eamodio/vscode-gitlens/main/images/docs/branches-view.png)
+
+  - [**_Remotes_ view**](https://github.com/eamodio/vscode-gitlens#remotes-view-) &mdash; visualize, explore, and manage Git remotes and remote branches
+
+    ![Remotes view](https://raw.githubusercontent.com/eamodio/vscode-gitlens/main/images/docs/remotes-view.png)
+
+  - [**_Stashes_ view**](https://github.com/eamodio/vscode-gitlens#stashes-view-) &mdash; visualize, explore, and manage Git stashes
+
+    ![Stashes view](https://raw.githubusercontent.com/eamodio/vscode-gitlens/main/images/docs/stashes-view.png)
+
+  - [**_Tags_ view**](https://github.com/eamodio/vscode-gitlens#tags-view-) &mdash; visualize, explore, and manage Git tags
+
+    ![Tags view](https://raw.githubusercontent.com/eamodio/vscode-gitlens/main/images/docs/tags-view.png)
+
+  - [**_Contributors_ view**](https://github.com/eamodio/vscode-gitlens#contributors-view-) &mdash; visualize, navigate, and explore contributors
+
+    ![Contributors view](https://raw.githubusercontent.com/eamodio/vscode-gitlens/main/images/docs/contributors-view.png)
+
+    - Moves the current user to be first and adds a `(you)` suffix
+
+  - [**_Search & Compare_ view**](https://github.com/eamodio/vscode-gitlens#search--compare-view-) &mdash; search and explore commit histories by message, author, files, id, etc, or visualize comparisons between branches, tags, commits, and more
+
+    ![Search & Compare view](https://raw.githubusercontent.com/eamodio/vscode-gitlens/main/images/docs/search-and-compare-view.png)
+
+    - Replaces the _Search Commits_ and _Compare Commits_ views
+    - Adds persistence (pinning) for both searches and comparisons
+    - Adds ability to edit existing searches
+
+  - Disables the _Repositories_ view by default, as it has been superseded by many new views. You can re-enable it by setting `"gitlens.views.repositories.enabled": true` or via the GitLens Interactive Settings
+
+  - Integrates line history into the [**_File History_ view**](https://github.com/eamodio/vscode-gitlens#file-history-view-)
+
+    ![File History view view](https://raw.githubusercontent.com/eamodio/vscode-gitlens/main/images/docs/file-history-view.png)
+
+    - Adds a new _Toggle History Mode_ command to toggle between showing file or line history
+    - Adds an indicator icon (up arrow) to unpublished (unpushed) commits
+    - Adds support for showing history across all branches via the _Toggle Filter_ menu command &mdash; closes [#974](https://github.com/eamodio/vscode-gitlens/issues/974)
+    - Adds staged changes
+
+  - _Welcome_ view &mdash; quickly setup GitLens to meet your needs (for first time users only)
+
+- Adds a user-friendly [**interactive rebase editor**](https://github.com/eamodio/vscode-gitlens#interactive-rebase-editor-) to easily configure an interactive rebase session
+
+  ![Rebase Editor](https://raw.githubusercontent.com/eamodio/vscode-gitlens/main/images/docs/rebase.gif)
+
+- Adds [**terminal links**](https://github.com/eamodio/vscode-gitlens#terminal-links-) &mdash; `ctrl+click` on autolinks in the integrated terminal to quickly jump to more details for commits, branches, tags, and more
+
+  ![Terminal Links](https://raw.githubusercontent.com/eamodio/vscode-gitlens/main/images/docs/terminal-links.gif)
+
+- Adds [**rich integration**](https://github.com/eamodio/vscode-gitlens#remote-provider-integrations-) with GitHub
+
+  - Adds GitHub avatar support!
+  - Adds associated pull request to line annotations and hovers
+
+    ![Pull requests on line annotation and hovers](https://raw.githubusercontent.com/eamodio/vscode-gitlens/main/images/docs/hovers-current-line-details.png)
+
+  - Adds associated pull request to status bar blame
+
+    ![Pull requests on status bar](https://raw.githubusercontent.com/eamodio/vscode-gitlens/main/images/docs/status-bar.png)
+
+  - Adds associated pull requests to branches and commits in GitLens views
+  - Adds autolinks for GitHub issues and pull requests, including titles, status, and authors
+
+- Adds a new and improved [**_Gutter Heatmap_**](https://github.com/eamodio/vscode-gitlens#gutter-heatmap-) file annotations, via the _Toggle File Heatmap Annotations_ command (`gitlens.toggleFileHeatmap`)
+
+  ![Gutter Heatmap](https://raw.githubusercontent.com/eamodio/vscode-gitlens/main/images/docs/gutter-heatmap.png)
+
+  - Displays the heatmap in the gutter for a cleaner look and avoids any code jumping
+  - Adds improved heatmap colorization for better clarity of old and new code
+  - Adds the hot/cold age threshold to the GitLens Interactive Settings
+
+- Adds a new and improved [**_Gutter Changes_**](https://github.com/eamodio/vscode-gitlens#gutter-changes-) file annotations, via the _Toggle File Changes Annotations_ command (`gitlens.toggleFileChanges`) &mdash; closes [#396](https://github.com/eamodio/vscode-gitlens/issues/396)
+
+  ![Gutter Changes](https://raw.githubusercontent.com/eamodio/vscode-gitlens/main/images/docs/gutter-changes.png)
+
+  - Provides indicators of local changes, if any, or recent commit changes, and distinguishes between added, changed, and removed lines
+  - Similar to the built-in Git gutter changes for un-staged changes, but shows all local (un-pushed) changes
+  - Shows a changes hover with the full set of changes (diff hunk) and even with unsaved changes
+
+- Adds many refinements to the [**_Git Command Palette_**](https://github.com/eamodio/vscode-gitlens#git-command-palette-) (previously _Git Commands_), and adds new commands
+
+  ![Git Command Palette](https://raw.githubusercontent.com/eamodio/vscode-gitlens/main/images/docs/git-command-palette.png)
+
+  - Adds many more options to existing commands
+  - Adds improved titles for better clarity, context, and flow
+  - Adds a new _history_ (log) command to show the commit history of a branch or tag
+    - Adds a _Reveal in Side Bar_ button to the quick pick menu toolbar
+    - Adds keyboard navigation
+      - `right arrow` &mdash; reveals the selected branch in the _Branches_ or _Remotes_ view (or _Repositories_ view, if enabled), if there is no text in the quick pick menu
+      - `alt+right arrow`, `ctrl+right arrow`, `cmd+right arrow` (macOS) &mdash; reveals the selected branch in the _Branches_ or _Remotes_ view
+  - Adds a new _show_ command to show the details of a commit
+    - Adds a _Reveal in Side Bar_ button to the quick pick menu toolbar
+    - Adds keyboard navigation
+      - `right arrow` &mdash; searches for the selected commit and shows the results in the _Search Commits_ view, if there is no text in the quick pick menu
+      - `alt+right arrow` &mdash; searches for the selected commit and shows the results in the _Search Commits_ view
+      - `ctrl+right arrow`, `cmd+right arrow` (macOS) &mdash; reveals the selected commit in the _Commits_ view (or _Repositories_ view, if enabled)
+  - Adds a new _status_ command to show the current respository status
+  - Adds a new _Delete Branch & Remote_ and _Force Delete Branch & Remote_ options to the _branch delete_ command &mdash; to more easily delete branches with tracking branches
+  - Adds ability pull (fetch) a specific branch(es) to the _pull_ command &mdash; closes [#873](https://github.com/eamodio/vscode-gitlens/issues/873)
+  - Adds a new _Publish Branch_ option to the _push_ command
+  - Adds ability to push a single branch to the _push_ command
+  - Adds support for honoring the `git.useForcePushWithLease` setting on the _push_ command
+  - Adds a new _Soft Reset_ (`--soft`) option to the _reset_ command
+
+- Adds improved autolinks support
+  - Adds a new `alphanumeric` flag to autolinks &mdash; closes [#946](https://github.com/eamodio/vscode-gitlens/issues/946)
+  - Adds autolink support in plain text (as footnotes)
+  - Allows autolinks inside parentheses and square brackets
+- Adds improved co-author support
+  - Provides an updatable quick pick of co-authors
+  - Adds the _Add Co-authors_ (`gitlens.addAuthors`) command to the Source Control context menu
+  - Adds an option to show or hide the _Add Co-authors_ command on the Source Control context menu to the _Menus & Toolbars_ section of the GitLens Interactive Settings
+- Adds many new commands
+  - _Open File from Remote_ (`gitlens.openFileFromRemote`) command &mdash; opens the local file from a remote file url
+  - _Set Views Layout_ (`gitlens.setViewsLayout`) command &mdash; quickly switch between showing GitLens views in _GitLens_ sidebar (default) and the _Source Control_ sidebar
+  - Adds a _Switch to Another Branch_ (`gitlens.views.switchToAnotherBranch`) command &mdash; to quickly switch the current branch
+  - _Copy Remote Commit Url_ command (`gitlens.copyRemoteCommitUrl`) &mdash; copies the url of the current line commit on the remote provider
+  - _Copy Remote Branch Url_ command (`gitlens.copyRemoteBranchUrl`) &mdash; copies the url of a branch on the remote provider
+  - _Copy Remote Branches Url_ command (`gitlens.copyRemoteBranchesUrl`) &mdash; copies the url of the branches on the remote provider
+  - _Open Comparison on Remote_ command (`gitlens.openComparisonOnRemote`) &mdash; opens the comparison on the remote provider
+  - _Copy Remote Comparison Url_ command (`gitlens.copyRemoteComparisonUrl`) &mdash; copies the url of the comparison on the remote provider
+  - _Open Pull Request_ command (`gitlens.openPullRequestOnRemote`) &mdash; opens the pull request on the remote provider
+  - _Copy Pull Request Url_ command (`gitlens.copyRemotePullRequestUrl`) &mdash; copies the url of the pull request on the remote provider
+  - _Copy Remote Repository Url_ command (`gitlens.copyRemoteRepositoryUrl`) &mdash; copies the url of the repository on the remote provider
+- Adds alternative `alt+click` commands for many of the _Open \* on Remote_ commands to alternatively copy the url to the clipboard
+- Adds an _Open Commit on Remote_ command (with an _Copy Remote Commit Url_ `alt+click` command) to commits in the VS Code Timeline view
+- Adds ability to set the default remote from any of the _Open \* on Remote_ command quick pick menus
+- Adds _Git Code Lens_ to markdown headers
+- Adds new _Git Code Lens_ options to disable the click actions on both the recent change and authors code lens &mdash; closes [#989](https://github.com/eamodio/vscode-gitlens/issues/989) thanks to [PR #1009](https://github.com/eamodio/vscode-gitlens/pull/1009) by Abdulrahman (Abdu) Assabri ([@abdusabri](https://github.com/abdusabri))
+- Adds per-language customizations to the `gitlens.codeLens.scopes` and `gitlens.codeLens.symbolScopes` settings &mdash; closes [#977](https://github.com/eamodio/vscode-gitlens/issues/977)
+- Adds new click behavior for changed files in GitLens views to open a diff of all contained changes
+- Adds a new `gitlens.hovers.avatarSize` setting to customize the size of avatars shown in hovers
+  - Increases the default avatar size in hovers from 16px to 32px
+- Adds _Hide Avatars_ or _Show Avatars_ menu command to many GitLens views to hide or show avatars
+- Adds _Hide Date Markers_ or _Show Date Markers_ menu command to many GitLens views to hide or show relative date markers
+- Adds real-time preview when editing format strings in the GitLens Interactive Settings
+- Adds a new commit format tokens: `${authorNotYou}`, `${agoOrDateShort}`, `${authorAgoOrDateShort}`, `${committerAgoOrDateShort}`
+- Adds synchronized storage to avoid opening the Welcome page or showing a What's New notification on new machines when Settings Sync is enabled
+- Adds new _Welcome_ and _Open Settings_ menu commands to the GitLens gear menu in the _Extensions_ sidebar &mdash; closes [#952](https://github.com/eamodio/vscode-gitlens/issues/952) & [#953](https://github.com/eamodio/vscode-gitlens/issues/953) thanks to [PR #992](https://github.com/eamodio/vscode-gitlens/pull/992) by Zeeshan Adnan ([@zeeshanadnan](https://github.com/zeeshanadnan))
+- Adds a new _HEAD_ choice to the compare quick pick menu &mdash; closes [#927](https://github.com/eamodio/vscode-gitlens/issues/927)
+- Adds support for `.gitattributes` text conversion filters &mdash; closes [#866](https://github.com/eamodio/vscode-gitlens/issues/866) thanks to [PR #1052](https://github.com/eamodio/vscode-gitlens/pull/1052) by Martin Campbell ([@martin-css](https://github.com/martin-css))
+- Adds week(s) ago to relative time formatting
+- Adds a limit of 5000 commits to the _Load All_ command in GitLens views
+- Adds a _Clear_ command to the branch comparison tool in GitLens views
+- Adds compact mode for showing branch and tag tips on commits in GitLens views
+- Adds _Copy SHA_ command to branches and tags in GitLens views
+
+### Changed
+
+- Changes all comparisons results to be split into ahead and behind groups
+- Changes _Git Code Lens_ to be less intrusive when they are unavailable because of unsaved changes, via new defaults for the `gitlens.strings.codeLens.unsavedChanges.*` settings
+- Refines all of the GitLens contributed menus to reduce noise and improve usability
+- Changes to use VS Code's built-in icons (codicons) where possible &mdash; closes [#985](https://github.com/eamodio/vscode-gitlens/issues/985)
+- Changes to use codicons in hovers &mdash; closes [#954](https://github.com/eamodio/vscode-gitlens/issues/954)
+- Changes revision navigation icons to better match VS Code
+- Changes all the _Open \* on Remote_ command icons to use the _globe_ codicon
+- Changes the comparison icons in GitLens views
+- Changes the default blame annotation format to show 50 characters (instead of 40)
+- Changes the relative date markers in GitLens views to be less prominent, and avoids showing the marker if it is first item
+- Changes commit quick pick menu commands to align with commit context menu commands
+- Changes the _Open Settings_ and _Welcome_ pages to open beside the active editor
+- Changes the default sorting of branches so that _main_, _master_, and _develop_ are first
+- Changes the sorting of branches in the _Git Commands Palette_ and other quick pick menus to be by date descending
+- Changes the default sorting of remotes so that _origin_ is first &mdash; closes [#924](https://github.com/eamodio/vscode-gitlens/issues/924) &mdash; thanks to [PR #925](https://github.com/eamodio/vscode-gitlens/pull/925) by Connor Peet ([@connor4312](https://github.com/connor4312))
+- Changes the default sorting of tags to be by date descending
+- Changes to limit `scm/resourceGroup/context` and `scm/resourceState/context` menu contributions
+- Changes to support latest emojis in commit messages
+- Improves VS Code startup performance by using the new `onStartupFinished` activation event
+- Improves the performance of the _Details_ hover
+- Improves the performance of loading _Contributors_ in the _Contributors_ and _Repositories_ views
+- Improves the performance and experience when opening multiple files or revisions
+- Improves the performance of the file system watching for repository changes (ignores `.gitignored` files)
+- Moves the avatars in the _Gutter Blame_ file annotations to be part of the annotations rather than in the gutter itself
+- Renames _Show More_ to _Load more_ in GitLens views
+- Renames _Show Commit Details_ command to _Show Commit_
+- Replaces _Push to Commit (via Terminal)_ command with a new _Push to Commit_ command
+- Deprecates the _Line History_ view, as it has been integrated into the _File History_ view. While it will likely be removed in a future version, you can be re-enable it by setting `"gitlens.views.lineHistory.enabled": true`
+- Deprecates the `gitlens.codeLens.scopesByLanguage` setting, use per-language `gitlens.codeLens.scopes`and`gitlens.codeLens.symbolScopes` settings instead
+- Deprecates the `gitlens.gitCommands.search.showResultsInView` setting as it has been renamed to `gitlens.gitCommands.search.showResultsInSideBar`
+- Deprecates the `gitlens.views.commitFileFormat` setting, use `gitlens.views.formats.files.label` instead
+- Deprecates the `gitlens.views.commitFileDescriptionFormat` setting, use `gitlens.views.formats.files.description` instead
+- Deprecates the `gitlens.views.commitFormat` setting, use `gitlens.views.formats.commits.label` instead
+- Deprecates the `gitlens.views.commitDescriptionFormat` setting, use `gitlens.views.formats.commits.description` instead
+- Deprecates the `gitlens.views.stashFileFormat` setting, use `gitlens.views.formats.files.label` instead
+- Deprecates the `gitlens.views.stashFileDescriptionFormat` setting, use `gitlens.views.formats.files.description` instead
+- Deprecates the `gitlens.views.stashFormat` setting, use `gitlens.views.formats.stashes.label` instead
+- Deprecates the `gitlens.views.stashDescriptionFormat` setting, use `gitlens.views.formats.stashes.description` instead
+- Deprecates the `gitlens.views.statusFileFormat` setting, use `gitlens.views.formats.files.label` instead
+- Deprecates the `gitlens.views.statusFileDescriptionFormat` setting, use `gitlens.views.formats.files.description` instead
+- Removes the sponsor heart icon from all GitLens views and simplifies the sponsor command
+- Removes the useless _Collapse All_ command from the _File History_ view
+- Removes the _Keep Open_ toggle button from the _Git Command Palette_ toolbar &mdash; the behavior is now automatically determined (unless overridden by the `gitlens.gitCommands.closeOnFocusOut` setting)
+- Removes `${changes}` token from commit description format by default
+- Removes the associated commit sha from tag descriptions
+- Removes many view visibility (enablement) settings as the control over a views visibility is more easily controlled directly by unchecking the view itself
+- Removes the `gitlens.views.repositories.showTrackingBranch` setting as it is now always enabled
+
+### Fixed
+
+- Fixes diffs of renamed files in certain cases
+- Fixes [#1139](https://github.com/eamodio/vscode-gitlens/issues/1139) - Git crash with v2.29.x
+- Fixes typo forcably -> forcibly &mdash; thanks to [PR #1138](https://github.com/eamodio/vscode-gitlens/pull/1138) by Andrea Cigana ([@ciganandrea](https://github.com/ciganandrea))
+- Fixes missing empty (non-merge) commits
+- Fixes issue with a blank branch name before any commits exist
+- Fixes issues with missing repository or file system change events while vs code is unfocused
+- Fixes remote url issues with spaces in the filename
+- Fixes issue where <remote>/HEAD was showing up as a branch
+- Fixes issues with revision navigation commands and diff editors
+- Fixes show command with single file commits
+- Fixes delete of remote branches on the _Git Command Palette_'s _branch_ command
+- Fixes _Git Command Palette_'s back tracking in certain cases
+- Fixes issue to ensure that dropping a stash drops the correct item even if the view is out of date
+- Fixes the _Push Stash & Keep Staged_ option on the _Git Command Palette_'s _stash_ command
+- Fixes issues with stashes and untracked files
+- Fixes the wrong icon on the _Unstage All Changes_ command
+- Fixes issue where a selection change wouldn't always trigger a Line History refresh
+- Fixes issues where GitLens' files would not re-open properly on reload
+- Fixes _Incomplete string escaping or encoding_ code scan warning &mdash; https://github.com/eamodio/vscode-gitlens/security/code-scanning/1
+- Fixes _Inefficient regular expression_ code scan warning &mdash; https://github.com/eamodio/vscode-gitlens/security/code-scanning/2
+- Fixes [#1072](https://github.com/eamodio/vscode-gitlens/issues/1072) - Add whitespace to tree item tooltip &mdash; thanks to [PR #1073](https://github.com/eamodio/vscode-gitlens/pull/1073) by Alex ([@deadmeu](https://github.com/deadmeu))
+- Fixes _Git Command Palette_'s _stash drop_ command not working
+- Fixes [#1033](https://github.com/eamodio/vscode-gitlens/issues/1033) - Adopt VS Code's 'asWebviewUri' API
+- Fixes issues with _Open Changes with Previous Revision_ and diff editors
+- Fixes issues with _Open Changes with Working File_ and diff editors
+- Fixes issue with the previous line diff line number being off
+- Fixes issues with bogus merge commits that can show up in file histories; now using `--first-parent` for git log with `--follow`
+- Fixes issues with paging git log with merge commits
+- Fixes directory compare from waiting for external tool to exit
+- Fixes [#996](https://github.com/eamodio/vscode-gitlens/issues/996) - Rename branch should show existing name highlighted
+- Fixes issues with folders that end with a space
+- Fixes typo in contributing search tag link &mdash; thanks to [PR #981](https://github.com/eamodio/vscode-gitlens/pull/981) by Guillem ([@guillemglez](https://github.com/guillemglez))
+- Fixes [#970](https://github.com/eamodio/vscode-gitlens/issues/970) - Stashes doesn't honor files layout
+- Fixes _Load more_ in GitLens views with range notation comparisons
+- Fixes `ignoreCase` flag on autolinks
+- Fixes [#951](https://github.com/eamodio/vscode-gitlens/issues/951) - Starring branch updates repository view properly &mdash; thanks to [PR #963](https://github.com/eamodio/vscode-gitlens/pull/963) by Zeeshan Adnan ([@zeeshanadnan](https://github.com/zeeshanadnan))
+- Fixes issues with switch branch command error handling
+- Fixes issues with stash command error handling
+- Fixes file history issues with copied and deleted files
+- Fixes intermittent issues with _Reveal Commit in Repopsitories View_
+- Fixes [#910](https://github.com/eamodio/vscode-gitlens/issues/910) - "Show Commit in Search Commits View" doesn't work
+- Fixes issues with hovers not showing on first editor
+- Fixes autolinking with remote providers
+- Fixes issues with some settings metadata
+
 ## [10.2.2] - 2020-06-10
 
 ### Added
@@ -92,13 +584,13 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/) and this p
   - Adds a new _branch_ command with sub-commands for _create_, _rename_, and _delete_
     - Adds a _Reveal Branch in Repositories View_ button to the quick pick menu toolbar
     - Adds keyboard navigation
-    - `right arrow` &mdash; reveals the selected branch in the _Repositories_ view, if there is no text in the quick pick menu
-    - `alt+left right`, `ctrl+left right`, `cmd+left right` (macOS) &mdash; reveals the selected branch in the _Repositories_ view
+      - `right arrow` &mdash; reveals the selected branch in the _Repositories_ view, if there is no text in the quick pick menu
+      - `alt+right arrow`, `ctrl+right arrow`, `cmd+right arrow` (macOS) &mdash; reveals the selected branch in the _Repositories_ view
   - Adds a new _tag_ command with sub-commands for _create_, and _delete_
     - Adds a _Reveal Branch in Repositories View_ or _Reveal Tag in Repositories View_ button to the quick pick menu toolbar
     - Adds keyboard navigation
-    - `right arrow` &mdash; reveals the selected branch or tag in the _Repositories_ view, if there is no text in the quick pick menu
-    - `alt+left right`, `ctrl+left right`, `cmd+left right` (macOS) &mdash; reveals the selected branch or tag in the _Repositories_ view
+      - `right arrow` &mdash; reveals the selected branch or tag in the _Repositories_ view, if there is no text in the quick pick menu
+      - `alt+right arrow`, `ctrl+right arrow`, `cmd+right arrow` (macOS) &mdash; reveals the selected branch or tag in the _Repositories_ view
 - Adds better co-author support &mdash; closes [#373](https://github.com/eamodio/vscode-gitlens/issues/373)
   - Adds a new _co-author_ command to the _Git Commands_ quick pick menu to add a co-author to a commit message
   - Adds a new _Add Co-authors_ command to the inline toolbar and context menu for the _Contributors_ node in the _Repositories_ view
@@ -164,7 +656,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/) and this p
     - Adds a _Reveal Stash in Repositories View_ button to the quick pick menu toolbar
     - Adds keyboard navigation
     - `right arrow` &mdash; reveals the selected stash in the _Repositories_ view, if there is no text in the quick pick menu
-    - `alt+left right`, `ctrl+left right`, `cmd+left right` (macOS) &mdash; reveals the selected stash in the _Repositories_ view
+    - `alt+right arrow`, `ctrl+right arrow`, `cmd+right arrow` (macOS) &mdash; reveals the selected stash in the _Repositories_ view
   - Adds a new _reset_ command to reset current HEAD to a specified commit
   - Adds a new _revert_ command to revert specific commits
   - Improves and enhances the _fetch_ command
@@ -198,8 +690,8 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/) and this p
   - Adds a _Show Commit in Search Commits View_ button to the quick pick menu toolbar
   - Adds keyboard navigation
     - `right arrow` &mdash; shows the selected commit in the _Search Commits_ view, if there is no text in the quick pick menu
-    - `alt+left right` &mdash; shows the selected commit in the _Search Commits_ view
-    - `ctrl+left right`, `cmd+left right` (macOS) &mdash; reveals the selected commit in the _Repositories_ view
+    - `alt+right arrow` &mdash; shows the selected commit in the _Search Commits_ view
+    - `ctrl+right arrow`, `cmd+right arrow` (macOS) &mdash; reveals the selected commit in the _Repositories_ view
 - Adds a _Reveal Commit in Repositories View_ (`gitlens.revealCommitInView`) command to reveal the current commit in the _Repositories_ view &mdash; this can take a while, so it will show a progress notification with the ability to cancel the operation
   - Adds _Reveal Commit in Repositories View_ command to the commit context menu in the views
   - Adds _Reveal Commit in Repositories View_ command in commit quick pick menu
@@ -472,7 +964,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/) and this p
 ### Added
 
 - Adds support for Live Share presence
-  - Adds an avatar presence indicator and an invite button to start a Live Share session with the code author<br />![Live Share presence](https://raw.githubusercontent.com/eamodio/vscode-gitlens/master/images/docs/hovers-details-vsls.png)
+  - Adds an avatar presence indicator and an invite button to start a Live Share session with the code author<br />![Live Share presence](https://raw.githubusercontent.com/eamodio/vscode-gitlens/98e225f39a8ebfb5c5bdd3018bc47b35a7e63a6c/images/docs/hovers-details-vsls.png)
   - Adds presence status and an _Invite to Live Share_ command to contributor nodes in the _Repositories_ view
 - Adds a new _Views Side Bar Layout_ section to the interactive settings editor (via the _GitLens: Open Settings_ command) with 3 layout presets
   - _Default_ &mdash; shows all the views together on the GitLens side bar
@@ -771,7 +1263,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/) and this p
 - Adds the date and a changes indicator (+x ~x -x) to stashed changes in GitLens views (uses the new `${changes}` token in the `gitlens.views.stashFormat` setting)
 - Adds the changed file status (added, modified, renamed, deleted, etc) to the tooltip of each revision in the _File History_ and _Line History_ views
 - Adds Git extended regex support to commit searches
-- Adds control over the menu commands contributed to the Source Control side bar to the GitLens interactive settings editor (via the `gitlens.menus` setting)
+- Adds control over the menu commands contributed to the Source Control side bar to the GitLens Interactive Settings (via the `gitlens.menus` setting)
 
 ### Changed
 
@@ -783,7 +1275,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/) and this p
 
 ### Fixed
 
-- Fixes an issue where gravatar icons would sometimes not show up &mdash; thanks to [PR #579](https://github.com/eamodio/vscode-gitlens/pull/579) by sgtwilko ([@sgtwilko](https://github.com/sgtwilko))
+- Fixes an issue where gravatar icons would sometimes not show up &mdash; thanks to [PR #579](https://github.com/eamodio/vscode-gitlens/pull/579) by Ian Wilkinson ([@sgtwilko](https://github.com/sgtwilko))
 - Fixes [#33](https://github.com/eamodio/vscode-gitlens/issues/33) &mdash; Commit messages can causes markdown formatting in hovers
 - Fixes [#501](https://github.com/eamodio/vscode-gitlens/issues/501) &mdash; Azure DevOps ssh remotes aren't handled properly
 - Fixes [#523](https://github.com/eamodio/vscode-gitlens/issues/523) &mdash; File History doesn't show all commits on file
@@ -836,22 +1328,22 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/) and this p
 - Adds a new Git virtual file system provider for the `gitlens:` scheme &mdash; closes [#430](https://github.com/eamodio/vscode-gitlens/issues/430)
   - Replaces GitLens' internal handling of file revisions, which allows for better performance, as well as avoiding the use of temp files. It also provides a much better experience when dealing with file encodings, images, etc.
 - Adds an _Explore the Repository from Here_ (`gitlens.views.exploreRepoRevision`) command which opens a virtual workspace folder (uses the new Git virtual file system provider) for the repository at the specified point in time (commit, branch, tag, etc) &mdash; closes [#398](https://github.com/eamodio/vscode-gitlens/issues/398)
-- Adds a new [_Repositories_ view](https://github.com/eamodio/vscode-gitlens/tree/master/#repositories-view- 'Jump to the Repositories view docs'), formerly the _GitLens_ view, to visualize, navigate, and explore Git repositories &mdash; closes [#456](https://github.com/eamodio/vscode-gitlens/issues/456), [#470](https://github.com/eamodio/vscode-gitlens/issues/470), [#494](https://github.com/eamodio/vscode-gitlens/issues/494)
-  <br/>[![Repositories view](https://raw.githubusercontent.com/eamodio/vscode-gitlens/master/images/docs/view-repositories.png)](https://github.com/eamodio/vscode-gitlens/tree/master/#repositories-view- 'Jump to the Repositories view docs')
-  - Provides a cleaner information-rich view of your opened repositories, more git commands (fetch, push, pull, checkout, stage, unstage, etc), better visibility and accessibility of existing features, and [more](https://github.com/eamodio/vscode-gitlens/tree/master/#repositories-view- 'Jump to the Repositories view docs')
+- Adds a new [_Repositories_ view](https://github.com/eamodio/vscode-gitlens/tree/98e225f39a8ebfb5c5bdd3018bc47b35a7e63a6c/#repositories-view- 'Jump to the Repositories view docs'), formerly the _GitLens_ view, to visualize, navigate, and explore Git repositories &mdash; closes [#456](https://github.com/eamodio/vscode-gitlens/issues/456), [#470](https://github.com/eamodio/vscode-gitlens/issues/470), [#494](https://github.com/eamodio/vscode-gitlens/issues/494)
+  <br/>[![Repositories view](https://raw.githubusercontent.com/eamodio/vscode-gitlens/98e225f39a8ebfb5c5bdd3018bc47b35a7e63a6c/images/docs/view-repositories.png)](https://github.com/eamodio/vscode-gitlens/tree/98e225f39a8ebfb5c5bdd3018bc47b35a7e63a6c/#repositories-view- 'Jump to the Repositories view docs')
+  - Provides a cleaner information-rich view of your opened repositories, more git commands (fetch, push, pull, checkout, stage, unstage, etc), better visibility and accessibility of existing features, and [more](https://github.com/eamodio/vscode-gitlens/tree/98e225f39a8ebfb5c5bdd3018bc47b35a7e63a6c/#repositories-view- 'Jump to the Repositories view docs')
   - Adds a `gitlens.views.repositories.autoReveal` setting to specify whether to automatically reveal repositories in the _Repositories_ view when opening files
-- Adds a new [_File History_ view](https://github.com/eamodio/vscode-gitlens/tree/master/#file-history-view- 'Jump to the File History view docs'), formerly the _History_ view, to visualize, navigate, and explore the revision history of the current file
-  <br/>[![File History view](https://raw.githubusercontent.com/eamodio/vscode-gitlens/master/images/docs/view-file-history.png)](https://github.com/eamodio/vscode-gitlens/tree/master/#file-history-view- 'Jump to the File History view docs')
-  - Provides similar features to the former _History_ view as well as quickly toggling file tracking on and off, changing the base (branch, tag, commit, etc) of the file's history, and [more](https://github.com/eamodio/vscode-gitlens/tree/master/#file-history-view- 'Jump to the File History view docs')
-- Adds an all-new [_Line History_ view](https://github.com/eamodio/vscode-gitlens/tree/master/#line-history-view- 'Jump to the Line History view docs') to visualize, navigate, and explore the revision history of the selected lines of current file &mdash; closes [#354](https://github.com/eamodio/vscode-gitlens/issues/354)
-  <br/>[![Line History view](https://raw.githubusercontent.com/eamodio/vscode-gitlens/master/images/docs/view-line-history.png)](https://github.com/eamodio/vscode-gitlens/tree/master/#line-history-view- 'Jump to the Line History view docs')
-  - Provides similar features to the _File History_ view including quickly toggling line tracking on and off, changing the base (branch, tag, commit, etc) of the selected lines' history, and [more](https://github.com/eamodio/vscode-gitlens/tree/master/#line-history-view- 'Jump to the Line History view docs')
-- Adds an all-new [_Search Commits_ view](https://github.com/eamodio/vscode-gitlens/tree/master/#search-commits-view- 'Jump to the Search Commits view docs') to search and explore commit histories by message, author, files, id, etc &mdash; closes [#455](https://github.com/eamodio/vscode-gitlens/issues/455)
-  <br/>[![Search Commits view](https://raw.githubusercontent.com/eamodio/vscode-gitlens/master/images/docs/view-search.png)](https://github.com/eamodio/vscode-gitlens/tree/master/#search-commits-view- 'Jump to the Search Commits view docs')
-  - Provides somewhat similar features to the former _Results_ view as well as it is now a persistent view, makes it easier to start a commit search, and [more](https://github.com/eamodio/vscode-gitlens/tree/master/#search-commits-view- 'Jump to the Search Commits view docs')
-- Adds an all-new [_Compare_ view](https://github.com/eamodio/vscode-gitlens/tree/master/#compare-view- 'Jump to the Compare view docs') to visualize comparisons between branches, tags, commits, and more
-  <br/>[![Compare view](https://raw.githubusercontent.com/eamodio/vscode-gitlens/master/images/docs/view-compare.png)](https://github.com/eamodio/vscode-gitlens/tree/master/#compare-view- 'Jump to the Compare view docs')
-  - Provides somewhat similar and powerful features to the former _Results_ view as well as it is now a persistent view, makes it easier to start a comparison, and [more](https://github.com/eamodio/vscode-gitlens/tree/master/#compare-view- 'Jump to the Compare view docs')
+- Adds a new [_File History_ view](https://github.com/eamodio/vscode-gitlens/tree/98e225f39a8ebfb5c5bdd3018bc47b35a7e63a6c/#file-history-view- 'Jump to the File History view docs'), formerly the _History_ view, to visualize, navigate, and explore the revision history of the current file
+  <br/>[![File History view](https://raw.githubusercontent.com/eamodio/vscode-gitlens/98e225f39a8ebfb5c5bdd3018bc47b35a7e63a6c/images/docs/view-file-history.png)](https://github.com/eamodio/vscode-gitlens/tree/98e225f39a8ebfb5c5bdd3018bc47b35a7e63a6c/#file-history-view- 'Jump to the File History view docs')
+  - Provides similar features to the former _History_ view as well as quickly toggling file tracking on and off, changing the base (branch, tag, commit, etc) of the file's history, and [more](https://github.com/eamodio/vscode-gitlens/tree/98e225f39a8ebfb5c5bdd3018bc47b35a7e63a6c/#file-history-view- 'Jump to the File History view docs')
+- Adds an all-new [_Line History_ view](https://github.com/eamodio/vscode-gitlens/tree/98e225f39a8ebfb5c5bdd3018bc47b35a7e63a6c/#line-history-view- 'Jump to the Line History view docs') to visualize, navigate, and explore the revision history of the selected lines of current file &mdash; closes [#354](https://github.com/eamodio/vscode-gitlens/issues/354)
+  <br/>[![Line History view](https://raw.githubusercontent.com/eamodio/vscode-gitlens/98e225f39a8ebfb5c5bdd3018bc47b35a7e63a6c/images/docs/view-line-history.png)](https://github.com/eamodio/vscode-gitlens/tree/98e225f39a8ebfb5c5bdd3018bc47b35a7e63a6c/#line-history-view- 'Jump to the Line History view docs')
+  - Provides similar features to the _File History_ view including quickly toggling line tracking on and off, changing the base (branch, tag, commit, etc) of the selected lines' history, and [more](https://github.com/eamodio/vscode-gitlens/tree/98e225f39a8ebfb5c5bdd3018bc47b35a7e63a6c/#line-history-view- 'Jump to the Line History view docs')
+- Adds an all-new [_Search Commits_ view](https://github.com/eamodio/vscode-gitlens/tree/98e225f39a8ebfb5c5bdd3018bc47b35a7e63a6c/#search-commits-view- 'Jump to the Search Commits view docs') to search and explore commit histories by message, author, files, id, etc &mdash; closes [#455](https://github.com/eamodio/vscode-gitlens/issues/455)
+  <br/>[![Search Commits view](https://raw.githubusercontent.com/eamodio/vscode-gitlens/98e225f39a8ebfb5c5bdd3018bc47b35a7e63a6c/images/docs/view-search.png)](https://github.com/eamodio/vscode-gitlens/tree/98e225f39a8ebfb5c5bdd3018bc47b35a7e63a6c/#search-commits-view- 'Jump to the Search Commits view docs')
+  - Provides somewhat similar features to the former _Results_ view as well as it is now a persistent view, makes it easier to start a commit search, and [more](https://github.com/eamodio/vscode-gitlens/tree/98e225f39a8ebfb5c5bdd3018bc47b35a7e63a6c/#search-commits-view- 'Jump to the Search Commits view docs')
+- Adds an all-new [_Compare_ view](https://github.com/eamodio/vscode-gitlens/tree/98e225f39a8ebfb5c5bdd3018bc47b35a7e63a6c/#compare-view- 'Jump to the Compare view docs') to visualize comparisons between branches, tags, commits, and more
+  <br/>[![Compare view](https://raw.githubusercontent.com/eamodio/vscode-gitlens/98e225f39a8ebfb5c5bdd3018bc47b35a7e63a6c/images/docs/view-compare.png)](https://github.com/eamodio/vscode-gitlens/tree/98e225f39a8ebfb5c5bdd3018bc47b35a7e63a6c/#compare-view- 'Jump to the Compare view docs')
+  - Provides somewhat similar and powerful features to the former _Results_ view as well as it is now a persistent view, makes it easier to start a comparison, and [more](https://github.com/eamodio/vscode-gitlens/tree/98e225f39a8ebfb5c5bdd3018bc47b35a7e63a6c/#compare-view- 'Jump to the Compare view docs')
 - Reduces the overhead of all GitLens views &mdash; GitLens now only tracks changes and updates the views if they are visible, collapsed or hidden views should have almost zero overhead
 - Adds relative date markers (_Less than a week ago_, _Over a week ago_, _Over a month ago_, etc) to revision (commit) histories in GitLens views
 - Adds branch and tag tip markers to revision (commit) histories in GitLens views &mdash; closes [#560](https://github.com/eamodio/vscode-gitlens/issues/560)

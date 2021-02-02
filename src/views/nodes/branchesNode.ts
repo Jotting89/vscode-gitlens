@@ -1,17 +1,18 @@
 'use strict';
-import { TreeItem, TreeItemCollapsibleState } from 'vscode';
-import { ViewBranchesLayout } from '../../configuration';
-import { Container } from '../../container';
-import { GitUri, Repository } from '../../git/gitService';
-import { Arrays, debug, gate } from '../../system';
-import { RepositoriesView } from '../repositoriesView';
+import { ThemeIcon, TreeItem, TreeItemCollapsibleState } from 'vscode';
+import { BranchesView } from '../branchesView';
 import { BranchNode } from './branchNode';
 import { BranchOrTagFolderNode } from './branchOrTagFolderNode';
-import { ResourceType, ViewNode } from './viewNode';
-import { RepositoryNode } from './repositoryNode';
 import { MessageNode } from './common';
+import { ViewBranchesLayout } from '../../configuration';
+import { Repository } from '../../git/git';
+import { GitUri } from '../../git/gitUri';
+import { RepositoriesView } from '../repositoriesView';
+import { RepositoryNode } from './repositoryNode';
+import { Arrays, debug, gate } from '../../system';
+import { ContextValues, ViewNode } from './viewNode';
 
-export class BranchesNode extends ViewNode<RepositoriesView> {
+export class BranchesNode extends ViewNode<BranchesView | RepositoriesView> {
 	static key = ':branches';
 	static getId(repoPath: string): string {
 		return `${RepositoryNode.getId(repoPath)}${this.key}`;
@@ -19,7 +20,12 @@ export class BranchesNode extends ViewNode<RepositoriesView> {
 
 	private _children: ViewNode[] | undefined;
 
-	constructor(uri: GitUri, view: RepositoriesView, parent: ViewNode, public readonly repo: Repository) {
+	constructor(
+		uri: GitUri,
+		view: BranchesView | RepositoriesView,
+		parent: ViewNode,
+		public readonly repo: Repository,
+	) {
 		super(uri, view, parent);
 	}
 
@@ -27,16 +33,28 @@ export class BranchesNode extends ViewNode<RepositoriesView> {
 		return BranchesNode.getId(this.repo.path);
 	}
 
+	get repoPath(): string {
+		return this.repo.path;
+	}
+
 	async getChildren(): Promise<ViewNode[]> {
-		if (this._children === undefined) {
+		if (this._children == null) {
 			const branches = await this.repo.getBranches({
 				// only show local branches
 				filter: b => !b.remote,
-				sort: true
+				sort: { current: false },
 			});
 			if (branches.length === 0) return [new MessageNode(this.view, this, 'No branches could be found.')];
 
-			const branchNodes = branches.map(b => new BranchNode(this.uri, this.view, this, b));
+			const branchNodes = branches.map(
+				b =>
+					new BranchNode(GitUri.fromRepoPath(this.uri.repoPath!, b.ref), this.view, this, b, false, {
+						showComparison:
+							this.view instanceof RepositoriesView
+								? this.view.config.branches.showBranchComparison
+								: this.view.config.showBranchComparison,
+					}),
+			);
 			if (this.view.config.branches.layout === ViewBranchesLayout.List) return branchNodes;
 
 			const hierarchy = Arrays.makeHierarchical(
@@ -47,7 +65,7 @@ export class BranchesNode extends ViewNode<RepositoriesView> {
 				b => {
 					b.compacted = true;
 					return true;
-				}
+				},
 			);
 
 			const root = new BranchOrTagFolderNode(
@@ -58,23 +76,21 @@ export class BranchesNode extends ViewNode<RepositoriesView> {
 				'',
 				undefined,
 				hierarchy,
-				'branches'
+				'branches',
 			);
 			this._children = root.getChildren();
 		}
+
 		return this._children;
 	}
 
 	async getTreeItem(): Promise<TreeItem> {
 		const item = new TreeItem('Branches', TreeItemCollapsibleState.Collapsed);
-		item.contextValue = ResourceType.Branches;
+		item.contextValue = ContextValues.Branches;
 		if (await this.repo.hasRemotes()) {
 			item.contextValue += '+remotes';
 		}
-		item.iconPath = {
-			dark: Container.context.asAbsolutePath('images/dark/icon-branch.svg'),
-			light: Container.context.asAbsolutePath('images/light/icon-branch.svg')
-		};
+		item.iconPath = new ThemeIcon('git-branch');
 		item.id = this.id;
 
 		return item;

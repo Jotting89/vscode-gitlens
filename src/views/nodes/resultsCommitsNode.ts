@@ -1,13 +1,15 @@
 'use strict';
 import { TreeItem, TreeItemCollapsibleState } from 'vscode';
-import { Container } from '../../container';
-import { GitLog, GitUri } from '../../git/gitService';
-import { debug, gate, Iterables, Promises } from '../../system';
-import { ViewWithFiles } from '../viewBase';
 import { CommitNode } from './commitNode';
-import { ShowMoreNode } from './common';
+import { LoadMoreNode } from './common';
+import { Container } from '../../container';
+import { GitLog } from '../../git/git';
+import { GitUri } from '../../git/gitUri';
 import { insertDateMarkers } from './helpers';
-import { PageableViewNode, ResourceType, ViewNode } from './viewNode';
+import { FilesQueryResults, ResultsFilesNode } from './resultsFilesNode';
+import { debug, gate, Iterables, Promises } from '../../system';
+import { ViewsWithCommits } from '../viewBase';
+import { ContextValues, PageableViewNode, ViewNode } from './viewNode';
 
 export interface CommitsQueryResults {
 	readonly label: string;
@@ -16,49 +18,93 @@ export interface CommitsQueryResults {
 	more?(limit: number | undefined): Promise<void>;
 }
 
-export class ResultsCommitsNode extends ViewNode<ViewWithFiles> implements PageableViewNode {
+export class ResultsCommitsNode<View extends ViewsWithCommits = ViewsWithCommits>
+	extends ViewNode<View>
+	implements PageableViewNode {
 	constructor(
-		view: ViewWithFiles,
+		view: View,
 		parent: ViewNode,
 		public readonly repoPath: string,
 		private _label: string,
-		private readonly _commitsQuery: (limit: number | undefined) => Promise<CommitsQueryResults>,
-		private readonly _options: { expand?: boolean; includeDescription?: boolean } = {}
+		private readonly _results: {
+			query: (limit: number | undefined) => Promise<CommitsQueryResults>;
+			comparison?: { ref1: string; ref2: string };
+			deferred?: boolean;
+			direction?: 'ahead' | 'behind';
+			files?: {
+				ref1: string;
+				ref2: string;
+				query: () => Promise<FilesQueryResults>;
+			};
+		},
+		private readonly _options: {
+			id?: string;
+			description?: string;
+			expand?: boolean;
+		} = {},
+		splatted?: boolean,
 	) {
 		super(GitUri.fromRepoPath(repoPath), view, parent);
 
-		this._options = { expand: true, includeDescription: true, ..._options };
+		if (splatted != null) {
+			this.splatted = splatted;
+		}
+		this._options = { expand: true, ..._options };
+	}
+
+	get ref1(): string | undefined {
+		return this._results.comparison?.ref1;
+	}
+
+	get ref2(): string | undefined {
+		return this._results.comparison?.ref2;
 	}
 
 	get id(): string {
-		return `${this.parent!.id}:results:commits`;
-	}
-
-	get type(): ResourceType {
-		return ResourceType.ResultsCommits;
+		return `${this.parent!.id}:results:commits${this._options.id ? `:${this._options.id}` : ''}`;
 	}
 
 	async getChildren(): Promise<ViewNode[]> {
 		const { log } = await this.getCommitsQueryResults();
-		if (log === undefined) return [];
+		if (log == null) return [];
+
+		const getBranchAndTagTips = await Container.git.getBranchesAndTagsTipsFn(this.uri.repoPath);
+		const children = [];
+
+		const { files } = this._results;
+		if (files != null) {
+			children.push(
+				new ResultsFilesNode(
+					this.view,
+					this,
+					this.uri.repoPath!,
+					files.ref1,
+					files.ref2,
+					files.query,
+					this._results.direction,
+					{
+						expand: false,
+					},
+				),
+			);
+		}
 
 		const options = { expand: this._options.expand && log.count === 1 };
 
-		const getBranchAndTagTips = await Container.git.getBranchesAndTagsTipsFn(this.uri.repoPath);
-		const children = [
+		children.push(
 			...insertDateMarkers(
 				Iterables.map(
 					log.commits.values(),
-					c => new CommitNode(this.view, this, c, undefined, getBranchAndTagTips, options)
+					c => new CommitNode(this.view, this, c, undefined, undefined, getBranchAndTagTips, options),
 				),
 				this,
 				undefined,
-				{ show: log.count > 1 }
-			)
-		];
+				{ show: log.count > 1 },
+			),
+		);
 
 		if (log.hasMore) {
-			children.push(new ShowMoreNode(this.view, this, 'Results', children[children.length - 1]));
+			children.push(new LoadMoreNode(this.view, this, children[children.length - 1]));
 		}
 
 		return children;
@@ -66,36 +112,36 @@ export class ResultsCommitsNode extends ViewNode<ViewWithFiles> implements Pagea
 
 	async getTreeItem(): Promise<TreeItem> {
 		let label;
-		let log;
 		let state;
 
-		try {
-			({ label, log } = await Promises.timeout(this.getCommitsQueryResults(), 100));
-			state =
-				log == null || log.count === 0
-					? TreeItemCollapsibleState.None
-					: this._options.expand || log.count === 1
-					? TreeItemCollapsibleState.Expanded
-					: TreeItemCollapsibleState.Collapsed;
-		} catch (ex) {
-			if (ex instanceof Promises.TimeoutError) {
-				ex.promise.then(() => this.triggerChange(false));
-			}
-
-			// Need to use Collapsed before we have results or the item won't show up in the view until the children are awaited
-			// https://github.com/microsoft/vscode/issues/54806 & https://github.com/microsoft/vscode/issues/62214
+		if (this._results.deferred) {
+			label = this._label;
 			state = TreeItemCollapsibleState.Collapsed;
+		} else {
+			try {
+				let log;
+				({ label, log } = await Promises.cancellable(this.getCommitsQueryResults(), 100));
+				state =
+					log == null || log.count === 0
+						? TreeItemCollapsibleState.None
+						: this._options.expand || log.count === 1
+						? TreeItemCollapsibleState.Expanded
+						: TreeItemCollapsibleState.Collapsed;
+			} catch (ex) {
+				if (ex instanceof Promises.CancellationError) {
+					ex.promise.then(() => this.triggerChange(false));
+				}
+
+				// Need to use Collapsed before we have results or the item won't show up in the view until the children are awaited
+				// https://github.com/microsoft/vscode/issues/54806 & https://github.com/microsoft/vscode/issues/62214
+				state = TreeItemCollapsibleState.Collapsed;
+			}
 		}
 
-		let description;
-		if (this._options.includeDescription && (await Container.git.getRepositoryCount()) > 1) {
-			const repo = await Container.git.getRepository(this.repoPath);
-			description = (repo && repo.formattedName) || this.repoPath;
-		}
-
-		const item = new TreeItem(label || this._label, state);
-		item.contextValue = this.type;
-		item.description = description;
+		const item = new TreeItem(label ?? this._label, state);
+		item.contextValue =
+			this._results.comparison != null ? ContextValues.CompareResultsCommits : ContextValues.SearchResultsCommits;
+		item.description = this._options.description;
 		item.id = this.id;
 
 		return item;
@@ -112,10 +158,16 @@ export class ResultsCommitsNode extends ViewNode<ViewWithFiles> implements Pagea
 
 	private _commitsQueryResults: Promise<CommitsQueryResults> | undefined;
 	private async getCommitsQueryResults() {
-		if (this._commitsQueryResults === undefined) {
-			this._commitsQueryResults = this._commitsQuery(this.limit ?? Container.config.advanced.maxSearchItems);
+		if (this._commitsQueryResults == null) {
+			this._commitsQueryResults = this._results.query(this.limit ?? Container.config.advanced.maxSearchItems);
 			const results = await this._commitsQueryResults;
 			this._hasMore = results.hasMore;
+
+			if (this._results.deferred) {
+				this._results.deferred = false;
+
+				void this.triggerChange(false);
+			}
 		}
 
 		return this._commitsQueryResults;
@@ -127,13 +179,14 @@ export class ResultsCommitsNode extends ViewNode<ViewWithFiles> implements Pagea
 	}
 
 	limit: number | undefined = this.view.getNodeLastKnownLimit(this);
-	async showMore(limit?: number) {
+	async loadMore(limit?: number) {
 		const results = await this.getCommitsQueryResults();
-		if (results === undefined || !results.hasMore) return;
+		if (results == null || !results.hasMore) return;
 
 		await results.more?.(limit ?? this.view.config.pageItemLimit);
 
 		this.limit = results.log?.count;
-		this.triggerChange(false);
+
+		void this.triggerChange(false);
 	}
 }

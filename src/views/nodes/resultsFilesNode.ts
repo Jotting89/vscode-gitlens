@@ -2,28 +2,35 @@
 import * as paths from 'path';
 import { TreeItem, TreeItemCollapsibleState } from 'vscode';
 import { ViewFilesLayout } from '../../configuration';
-import { GitFile, GitUri } from '../../git/gitService';
+import { GitFile } from '../../git/git';
+import { GitUri } from '../../git/gitUri';
 import { Arrays, debug, gate, Iterables, Promises, Strings } from '../../system';
-import { ViewWithFiles } from '../viewBase';
+import { ViewsWithCommits } from '../viewBase';
 import { FileNode, FolderNode } from './folderNode';
 import { ResultsFileNode } from './resultsFileNode';
-import { ResourceType, ViewNode } from './viewNode';
+import { ContextValues, ViewNode } from './viewNode';
 
 export interface FilesQueryResults {
 	label: string;
-	diff: GitFile[] | undefined;
+	files: GitFile[] | undefined;
 }
 
-export class ResultsFilesNode extends ViewNode<ViewWithFiles> {
+export class ResultsFilesNode extends ViewNode<ViewsWithCommits> {
 	constructor(
-		view: ViewWithFiles,
+		view: ViewsWithCommits,
 		parent: ViewNode,
 		public readonly repoPath: string,
 		public readonly ref1: string,
 		public readonly ref2: string,
-		private readonly _filesQuery: () => Promise<FilesQueryResults>
+		private readonly _filesQuery: () => Promise<FilesQueryResults>,
+		private readonly direction: 'ahead' | 'behind' | undefined,
+		private readonly _options: {
+			expand?: boolean;
+		} = {},
 	) {
 		super(GitUri.fromRepoPath(repoPath), view, parent);
+
+		this._options = { expand: true, ..._options };
 	}
 
 	get id(): string {
@@ -31,11 +38,14 @@ export class ResultsFilesNode extends ViewNode<ViewWithFiles> {
 	}
 
 	async getChildren(): Promise<ViewNode[]> {
-		const { diff } = await this.getFilesQueryResults();
-		if (diff === undefined) return [];
+		const { files } = await this.getFilesQueryResults();
+		if (files == null) return [];
 
 		let children: FileNode[] = [
-			...Iterables.map(diff, s => new ResultsFileNode(this.view, this, this.repoPath, s, this.ref1, this.ref2))
+			...Iterables.map(
+				files,
+				s => new ResultsFileNode(this.view, this, this.repoPath, s, this.ref1, this.ref2, this.direction),
+			),
 		];
 
 		if (this.view.config.files.layout !== ViewFilesLayout.List) {
@@ -43,7 +53,7 @@ export class ResultsFilesNode extends ViewNode<ViewWithFiles> {
 				children,
 				n => n.uri.relativePath.split('/'),
 				(...parts: string[]) => Strings.normalizePath(paths.join(...parts)),
-				this.view.config.files.compact
+				this.view.config.files.compact,
 			);
 
 			const root = new FolderNode(this.view, this, this.repoPath, '', hierarchy);
@@ -52,7 +62,7 @@ export class ResultsFilesNode extends ViewNode<ViewWithFiles> {
 			children.sort(
 				(a, b) =>
 					a.priority - b.priority ||
-					a.label!.localeCompare(b.label!, undefined, { numeric: true, sensitivity: 'base' })
+					a.label!.localeCompare(b.label!, undefined, { numeric: true, sensitivity: 'base' }),
 			);
 		}
 
@@ -61,15 +71,19 @@ export class ResultsFilesNode extends ViewNode<ViewWithFiles> {
 
 	async getTreeItem(): Promise<TreeItem> {
 		let label;
-		let diff;
+		let files;
 		let state;
 
 		try {
-			({ label, diff } = await Promises.timeout(this.getFilesQueryResults(), 100));
+			({ label, files } = await Promises.cancellable(this.getFilesQueryResults(), 100));
 			state =
-				diff == null || diff.length === 0 ? TreeItemCollapsibleState.None : TreeItemCollapsibleState.Expanded;
+				files == null || files.length === 0
+					? TreeItemCollapsibleState.None
+					: this._options.expand
+					? TreeItemCollapsibleState.Expanded
+					: TreeItemCollapsibleState.Collapsed;
 		} catch (ex) {
-			if (ex instanceof Promises.TimeoutError) {
+			if (ex instanceof Promises.CancellationError) {
 				ex.promise.then(() => this.triggerChange(false));
 			}
 
@@ -78,8 +92,8 @@ export class ResultsFilesNode extends ViewNode<ViewWithFiles> {
 			state = TreeItemCollapsibleState.Collapsed;
 		}
 
-		const item = new TreeItem(label || 'files changed', state);
-		item.contextValue = ResourceType.ResultsFiles;
+		const item = new TreeItem(label ?? 'files changed', state);
+		item.contextValue = ContextValues.ResultsFiles;
 		item.id = this.id;
 
 		return item;

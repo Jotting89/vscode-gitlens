@@ -31,7 +31,10 @@ export class StatusFileFormatter extends Formatter<GitFile, StatusFormatOptions>
 	}
 
 	get filePath() {
-		const filePath = GitFile.getFormattedPath(this._item, { relativeTo: this._options.relativePath });
+		const filePath = GitFile.getFormattedPath(this._item, {
+			relativeTo: this._options.relativePath,
+			truncateTo: this._options.tokenOptions.filePath?.truncateTo,
+		});
 		return this._padOrTruncate(filePath, this._options.tokenOptions.filePath);
 	}
 
@@ -80,12 +83,12 @@ export class StatusFileFormatter extends Formatter<GitFile, StatusFormatOptions>
 	static fromTemplate(
 		template: string,
 		file: GitFile,
-		dateFormatOrOptions?: string | null | StatusFormatOptions
+		dateFormatOrOptions?: string | null | StatusFormatOptions,
 	): string;
 	static fromTemplate(
 		template: string,
 		file: GitFile,
-		dateFormatOrOptions?: string | null | StatusFormatOptions
+		dateFormatOrOptions?: string | null | StatusFormatOptions,
 	): string {
 		return super.fromTemplateCore(this, template, file, dateFormatOrOptions);
 	}

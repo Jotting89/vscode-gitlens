@@ -1,13 +1,13 @@
 'use strict';
 import { Disposable, TextEditor, TreeItem, TreeItemCollapsibleState, window } from 'vscode';
 import { Container } from '../../container';
-import { GitUri } from '../../git/gitService';
+import { GitUri } from '../../git/gitUri';
 import { Logger } from '../../logger';
 import { debug, Functions, gate } from '../../system';
 import { RepositoriesView } from '../repositoriesView';
 import { MessageNode } from './common';
 import { RepositoryNode } from './repositoryNode';
-import { ResourceType, SubscribeableViewNode, unknownGitUri, ViewNode } from './viewNode';
+import { ContextValues, SubscribeableViewNode, unknownGitUri, ViewNode } from './viewNode';
 
 export class RepositoriesNode extends SubscribeableViewNode<RepositoriesView> {
 	private _children: (RepositoryNode | MessageNode)[] | undefined;
@@ -47,9 +47,7 @@ export class RepositoriesNode extends SubscribeableViewNode<RepositoriesView> {
 
 	getTreeItem(): TreeItem {
 		const item = new TreeItem('Repositories', TreeItemCollapsibleState.Expanded);
-		item.contextValue = ResourceType.Repositories;
-
-		void this.ensureSubscription();
+		item.contextValue = ContextValues.Repositories;
 
 		return item;
 	}
@@ -104,11 +102,15 @@ export class RepositoriesNode extends SubscribeableViewNode<RepositoriesView> {
 
 		if (this.view.config.autoReveal) {
 			subscriptions.push(
-				window.onDidChangeActiveTextEditor(Functions.debounce(this.onActiveEditorChanged, 500), this)
+				window.onDidChangeActiveTextEditor(Functions.debounce(this.onActiveEditorChanged, 500), this),
 			);
 		}
 
 		return Disposable.from(...subscriptions);
+	}
+
+	protected get requiresResetOnVisible(): boolean {
+		return true;
 	}
 
 	@debug({ args: false })

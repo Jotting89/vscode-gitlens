@@ -1,18 +1,20 @@
 'use strict';
-import { env, TextEditor, Uri, window } from 'vscode';
-import { Container } from '../container';
-import { GitUri } from '../git/gitService';
-import { Logger } from '../logger';
-import { Messages } from '../messages';
-import { Iterables } from '../system';
+import { env, TextEditor, Uri } from 'vscode';
 import {
 	ActiveEditorCommand,
 	command,
 	CommandContext,
 	Commands,
 	getCommandUri,
-	isCommandViewContextWithCommit
+	isCommandContextViewNodeHasBranch,
+	isCommandContextViewNodeHasCommit,
+	isCommandContextViewNodeHasTag,
 } from './common';
+import { Container } from '../container';
+import { GitUri } from '../git/gitUri';
+import { Logger } from '../logger';
+import { Messages } from '../messages';
+import { Iterables } from '../system';
 
 export interface CopyShaToClipboardCommandArgs {
 	sha?: string;
@@ -25,10 +27,20 @@ export class CopyShaToClipboardCommand extends ActiveEditorCommand {
 	}
 
 	protected preExecute(context: CommandContext, args?: CopyShaToClipboardCommandArgs) {
-		if (isCommandViewContextWithCommit(context)) {
+		if (isCommandContextViewNodeHasCommit(context)) {
 			args = { ...args };
-			args.sha = context.node.commit.sha;
+			args.sha = Container.config.advanced.abbreviateShaOnCopy
+				? context.node.commit.shortSha
+				: context.node.commit.sha;
 			return this.execute(context.editor, context.node.commit.uri, args);
+		} else if (isCommandContextViewNodeHasBranch(context)) {
+			args = { ...args };
+			args.sha = context.node.branch.sha;
+			return this.execute(context.editor, context.node.uri, args);
+		} else if (isCommandContextViewNodeHasTag(context)) {
+			args = { ...args };
+			args.sha = context.node.tag.sha;
+			return this.execute(context.editor, context.node.uri, args);
 		}
 
 		return this.execute(context.editor, context.uri, args);
@@ -42,43 +54,36 @@ export class CopyShaToClipboardCommand extends ActiveEditorCommand {
 			// If we don't have an editor then get the sha of the last commit to the branch
 			if (uri == null) {
 				const repoPath = await Container.git.getActiveRepoPath(editor);
-				if (!repoPath) return undefined;
+				if (!repoPath) return;
 
 				const log = await Container.git.getLog(repoPath, { limit: 1 });
-				if (!log) return undefined;
+				if (log == null) return;
 
 				args.sha = Iterables.first(log.commits.values()).sha;
-			} else if (args.sha === undefined) {
-				const blameline = (editor && editor.selection.active.line) || 0;
-				if (blameline < 0) return undefined;
+			} else if (args.sha == null) {
+				const blameline = editor?.selection.active.line ?? 0;
+				if (blameline < 0) return;
 
 				try {
 					const gitUri = await GitUri.fromUri(uri);
-					const blame =
-						editor && editor.document && editor.document.isDirty
-							? await Container.git.getBlameForLineContents(gitUri, blameline, editor.document.getText())
-							: await Container.git.getBlameForLine(gitUri, blameline);
-					if (blame === undefined) return undefined;
+					const blame = editor?.document.isDirty
+						? await Container.git.getBlameForLineContents(gitUri, blameline, editor.document.getText())
+						: await Container.git.getBlameForLine(gitUri, blameline);
+					if (blame == null) return;
 
 					args.sha = blame.commit.sha;
 				} catch (ex) {
 					Logger.error(ex, 'CopyShaToClipboardCommand', `getBlameForLine(${blameline})`);
-					return Messages.showGenericErrorMessage('Unable to copy commit id');
+					void Messages.showGenericErrorMessage('Unable to copy commit SHA');
+
+					return;
 				}
 			}
 
 			void (await env.clipboard.writeText(args.sha));
-			return undefined;
 		} catch (ex) {
-			if (ex.message.includes("Couldn't find the required `xsel` binary")) {
-				window.showErrorMessage(
-					'Unable to copy commit id, xsel is not installed. Please install it via your package manager, e.g. `sudo apt install xsel`'
-				);
-				return undefined;
-			}
-
 			Logger.error(ex, 'CopyShaToClipboardCommand');
-			return Messages.showGenericErrorMessage('Unable to copy commit id');
+			void Messages.showGenericErrorMessage('Unable to copy commit SHA');
 		}
 	}
 }

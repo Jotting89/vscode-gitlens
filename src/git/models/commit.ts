@@ -4,10 +4,9 @@ import { configuration, DateSource, DateStyle, GravatarDefaultStyle } from '../.
 import { Container } from '../../container';
 import { Dates, memoize } from '../../system';
 import { CommitFormatter } from '../formatters/formatters';
-import { Git } from '../git';
 import { GitUri } from '../gitUri';
 import { getAvatarUri } from '../../avatars';
-import { GitReference } from './models';
+import { GitReference, GitRevision, GitRevisionReference, PullRequest } from './models';
 
 export interface GitAuthor {
 	name: string;
@@ -27,7 +26,7 @@ export enum GitCommitType {
 	Log = 'log',
 	LogFile = 'logFile',
 	Stash = 'stash',
-	StashFile = 'stashFile'
+	StashFile = 'stashFile',
 }
 
 export const CommitDateFormatting = {
@@ -39,19 +38,19 @@ export const CommitDateFormatting = {
 		CommitDateFormatting.dateFormat = configuration.get('defaultDateFormat');
 		CommitDateFormatting.dateSource = configuration.get('defaultDateSource');
 		CommitDateFormatting.dateStyle = configuration.get('defaultDateStyle');
-	}
+	},
 };
 
-export abstract class GitCommit implements GitReference {
+export abstract class GitCommit implements GitRevisionReference {
 	static is(commit: any): commit is GitCommit {
 		return commit instanceof GitCommit;
 	}
 
-	static isOfRefType(branch: GitReference | undefined) {
-		return branch !== undefined && branch.refType === 'revision';
+	static isOfRefType(commit: GitReference | undefined) {
+		return commit?.refType === 'revision' || commit?.refType === 'stash';
 	}
 
-	readonly refType = 'revision';
+	readonly refType: GitRevisionReference['refType'] = 'revision';
 
 	constructor(
 		public readonly type: GitCommitType,
@@ -65,9 +64,13 @@ export abstract class GitCommit implements GitReference {
 		fileName: string,
 		public readonly originalFileName: string | undefined,
 		public previousSha: string | undefined,
-		public previousFileName: string | undefined
+		public previousFileName: string | undefined,
 	) {
 		this._fileName = fileName || '';
+	}
+
+	get hasConflicts(): boolean {
+		return false;
 	}
 
 	get ref() {
@@ -96,7 +99,7 @@ export abstract class GitCommit implements GitReference {
 
 	@memoize()
 	get shortSha() {
-		return Git.shortenSha(this.sha);
+		return GitRevision.shorten(this.sha);
 	}
 
 	get isFile() {
@@ -113,12 +116,12 @@ export abstract class GitCommit implements GitReference {
 
 	@memoize()
 	get isUncommitted(): boolean {
-		return Git.isUncommitted(this.sha);
+		return GitRevision.isUncommitted(this.sha);
 	}
 
 	@memoize()
 	get isUncommittedStaged(): boolean {
-		return Git.isUncommittedStaged(this.sha);
+		return GitRevision.isUncommittedStaged(this.sha);
 	}
 
 	@memoize()
@@ -131,7 +134,7 @@ export abstract class GitCommit implements GitReference {
 	}
 
 	get previousShortSha() {
-		return this.previousSha && Git.shortenSha(this.previousSha);
+		return this.previousSha && GitRevision.shorten(this.previousSha);
 	}
 
 	get previousUri(): Uri {
@@ -143,8 +146,16 @@ export abstract class GitCommit implements GitReference {
 		return GitUri.resolveToUri(this.fileName, this.repoPath);
 	}
 
+	@memoize()
+	async getAssociatedPullRequest(): Promise<PullRequest | undefined> {
+		const remote = await Container.git.getRichRemoteProvider(this.repoPath);
+		if (remote?.provider == null) return undefined;
+
+		return Container.git.getPullRequestForCommit(this.ref, remote);
+	}
+
 	@memoize<GitCommit['getPreviousLineDiffUris']>(
-		(uri, editorLine, ref) => `${uri.toString(true)}|${editorLine || ''}|${ref || ''}`
+		(uri, editorLine, ref) => `${uri.toString(true)}|${editorLine ?? ''}|${ref ?? ''}`,
 	)
 	getPreviousLineDiffUris(uri: Uri, editorLine: number, ref: string | undefined) {
 		if (!this.isFile) return Promise.resolve(undefined);
@@ -184,8 +195,8 @@ export abstract class GitCommit implements GitReference {
 		return this.authorDateFormatter.format(format);
 	}
 
-	formatAuthorDateFromNow() {
-		return this.authorDateFormatter.fromNow();
+	formatAuthorDateFromNow(locale?: string) {
+		return this.authorDateFormatter.fromNow(locale);
 	}
 
 	@memoize<GitCommit['formatCommitterDate']>(format => (format == null ? 'MMMM Do, YYYY h:mma' : format))
@@ -197,8 +208,8 @@ export abstract class GitCommit implements GitReference {
 		return this.committerDateFormatter.format(format);
 	}
 
-	formatCommitterDateFromNow() {
-		return this.committerDateFormatter.fromNow();
+	formatCommitterDateFromNow(locale?: string) {
+		return this.committerDateFormatter.fromNow(locale);
 	}
 
 	@memoize<GitCommit['formatDate']>(format => (format == null ? 'MMMM Do, YYYY h:mma' : format))
@@ -210,22 +221,22 @@ export abstract class GitCommit implements GitReference {
 		return this.dateFormatter.format(format);
 	}
 
-	formatDateFromNow() {
-		return this.dateFormatter.fromNow();
+	formatDateFromNow(locale?: string) {
+		return this.dateFormatter.fromNow(locale);
 	}
 
-	getFormattedPath(options: { relativeTo?: string; separator?: string; suffix?: string } = {}): string {
+	getFormattedPath(options: { relativeTo?: string; suffix?: string; truncateTo?: number } = {}): string {
 		return GitUri.getFormattedPath(this.fileName, options);
 	}
 
-	getGravatarUri(fallback: GravatarDefaultStyle, size: number = 16): Uri {
-		return getAvatarUri(this.email, fallback, size);
+	getAvatarUri(options?: { defaultStyle?: GravatarDefaultStyle; size?: number }): Uri | Promise<Uri> {
+		return getAvatarUri(this.email, this, options);
 	}
 
 	@memoize()
 	getShortMessage() {
 		// eslint-disable-next-line no-template-curly-in-string
-		return CommitFormatter.fromTemplate('${message}', this, { truncateMessageAtNewLine: true });
+		return CommitFormatter.fromTemplate('${message}', this, { messageTruncateAtNewLine: true });
 	}
 
 	@memoize()

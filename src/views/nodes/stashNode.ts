@@ -1,20 +1,21 @@
 'use strict';
+import * as paths from 'path';
 import { TreeItem, TreeItemCollapsibleState } from 'vscode';
+import { ViewFilesLayout } from '../../config';
 import { Container } from '../../container';
-import { CommitFormatter, GitStashCommit } from '../../git/gitService';
-import { Iterables } from '../../system';
-import { View } from '../viewBase';
-import { StashFileNode } from './stashFileNode';
-import { ResourceType, ViewNode, ViewRefNode } from './viewNode';
-import { RepositoryNode } from './repositoryNode';
+import { CommitFormatter, GitStashCommit, GitStashReference } from '../../git/git';
+import { ContextValues, FileNode, FolderNode, RepositoryNode, StashFileNode, ViewNode, ViewRefNode } from '../nodes';
+import { RepositoriesView } from '../repositoriesView';
+import { StashesView } from '../stashesView';
+import { Arrays, Strings } from '../../system';
 
-export class StashNode extends ViewRefNode {
+export class StashNode extends ViewRefNode<StashesView | RepositoriesView, GitStashReference> {
 	static key = ':stash';
 	static getId(repoPath: string, ref: string): string {
 		return `${RepositoryNode.getId(repoPath)}${this.key}(${ref})`;
 	}
 
-	constructor(view: View, parent: ViewNode, public readonly commit: GitStashCommit) {
+	constructor(view: StashesView | RepositoriesView, parent: ViewNode, public readonly commit: GitStashCommit) {
 		super(commit.toGitUri(), view, parent);
 	}
 
@@ -26,50 +27,54 @@ export class StashNode extends ViewRefNode {
 		return StashNode.getId(this.commit.repoPath, this.commit.sha);
 	}
 
-	get ref(): string {
-		return this.commit.sha;
+	get ref(): GitStashReference {
+		return this.commit;
 	}
 
 	async getChildren(): Promise<ViewNode[]> {
-		const files = this.commit.files;
+		// Ensure we have checked for untracked files
+		await this.commit.checkForUntrackedFiles();
 
-		// Check for any untracked files -- since git doesn't return them via `git stash list` :(
-		// See https://stackoverflow.com/questions/12681529/
-		const log = await Container.git.getLog(this.commit.repoPath, {
-			limit: 1,
-			ref: `${this.commit.stashName}^3`
-		});
-		if (log !== undefined) {
-			const commit = Iterables.first(log.commits.values());
-			if (commit !== undefined && commit.files.length !== 0) {
-				// Since these files are untracked -- make them look that way
-				commit.files.forEach(s => (s.status = '?'));
-				files.splice(files.length, 0, ...commit.files);
-			}
+		let children: FileNode[] = this.commit.files.map(
+			s => new StashFileNode(this.view, this, s, this.commit.toFileCommit(s)!),
+		);
+
+		if (this.view.config.files.layout !== ViewFilesLayout.List) {
+			const hierarchy = Arrays.makeHierarchical(
+				children,
+				n => n.uri.relativePath.split('/'),
+				(...parts: string[]) => Strings.normalizePath(paths.join(...parts)),
+				this.view.config.files.compact,
+			);
+
+			const root = new FolderNode(this.view, this, this.repoPath, '', hierarchy);
+			children = root.getChildren() as FileNode[];
+		} else {
+			children.sort((a, b) =>
+				a.label!.localeCompare(b.label!, undefined, { numeric: true, sensitivity: 'base' }),
+			);
 		}
-
-		const children = files.map(s => new StashFileNode(this.view, this, s, this.commit.toFileCommit(s)));
-		children.sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true, sensitivity: 'base' }));
 		return children;
 	}
 
 	getTreeItem(): TreeItem {
 		const item = new TreeItem(
-			CommitFormatter.fromTemplate(this.view.config.stashFormat, this.commit, {
-				truncateMessageAtNewLine: true,
-				dateFormat: Container.config.defaultDateFormat
+			CommitFormatter.fromTemplate(this.view.config.formats.stashes.label, this.commit, {
+				messageTruncateAtNewLine: true,
+				dateFormat: Container.config.defaultDateFormat,
 			}),
-			TreeItemCollapsibleState.Collapsed
+			TreeItemCollapsibleState.Collapsed,
 		);
 		item.id = this.id;
-		item.description = CommitFormatter.fromTemplate(this.view.config.stashDescriptionFormat, this.commit, {
-			truncateMessageAtNewLine: true,
-			dateFormat: Container.config.defaultDateFormat
+		item.description = CommitFormatter.fromTemplate(this.view.config.formats.stashes.description, this.commit, {
+			messageTruncateAtNewLine: true,
+			dateFormat: Container.config.defaultDateFormat,
 		});
-		item.contextValue = ResourceType.Stash;
+		item.contextValue = ContextValues.Stash;
 		// eslint-disable-next-line no-template-curly-in-string
 		item.tooltip = CommitFormatter.fromTemplate('${ago} (${date})\n\n${message}', this.commit, {
-			dateFormat: Container.config.defaultDateFormat
+			dateFormat: Container.config.defaultDateFormat,
+			// messageAutolinks: true,
 		});
 
 		return item;

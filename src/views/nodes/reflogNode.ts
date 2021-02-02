@@ -1,13 +1,14 @@
 'use strict';
 import { TreeItem, TreeItemCollapsibleState } from 'vscode';
+import { LoadMoreNode, MessageNode } from './common';
 import { Container } from '../../container';
-import { GitReflog, GitUri, Repository } from '../../git/gitService';
-import { PageableViewNode, ResourceType, ViewNode } from './viewNode';
-import { RepositoriesView } from '../repositoriesView';
+import { GitReflog, Repository } from '../../git/git';
+import { GitUri } from '../../git/gitUri';
 import { ReflogRecordNode } from './reflogRecordNode';
-import { debug, gate } from '../../system';
-import { MessageNode, ShowMoreNode } from './common';
+import { RepositoriesView } from '../repositoriesView';
 import { RepositoryNode } from './repositoryNode';
+import { debug, gate } from '../../system';
+import { ContextValues, PageableViewNode, ViewNode } from './viewNode';
 
 export class ReflogNode extends ViewNode<RepositoriesView> implements PageableViewNode {
 	static key = ':reflog';
@@ -37,7 +38,7 @@ export class ReflogNode extends ViewNode<RepositoriesView> implements PageableVi
 			children.push(...reflog.records.map(r => new ReflogRecordNode(this.view, this, r)));
 
 			if (reflog.hasMore) {
-				children.push(new ShowMoreNode(this.view, this, 'Activity', children[children.length - 1]));
+				children.push(new LoadMoreNode(this.view, this, children[children.length - 1]));
 			}
 
 			this._children = children;
@@ -48,11 +49,11 @@ export class ReflogNode extends ViewNode<RepositoriesView> implements PageableVi
 	getTreeItem(): TreeItem {
 		const item = new TreeItem('Incoming Activity', TreeItemCollapsibleState.Collapsed);
 		item.id = this.id;
-		item.contextValue = ResourceType.Reflog;
+		item.contextValue = ContextValues.Reflog;
 		item.description = 'experimental';
 		item.iconPath = {
 			dark: Container.context.asAbsolutePath('images/dark/icon-activity.svg'),
-			light: Container.context.asAbsolutePath('images/light/icon-activity.svg')
+			light: Container.context.asAbsolutePath('images/light/icon-activity.svg'),
 		};
 
 		return item;
@@ -72,7 +73,7 @@ export class ReflogNode extends ViewNode<RepositoriesView> implements PageableVi
 		if (this._reflog === undefined) {
 			this._reflog = await Container.git.getIncomingActivity(this.repo.path, {
 				all: true,
-				limit: this.limit ?? this.view.config.defaultItemLimit
+				limit: this.limit ?? this.view.config.defaultItemLimit,
 			});
 		}
 
@@ -84,7 +85,7 @@ export class ReflogNode extends ViewNode<RepositoriesView> implements PageableVi
 	}
 
 	limit: number | undefined = this.view.getNodeLastKnownLimit(this);
-	async showMore(limit?: number) {
+	async loadMore(limit?: number) {
 		let reflog = await this.getReflog();
 		if (reflog === undefined || !reflog.hasMore) return;
 
@@ -93,6 +94,6 @@ export class ReflogNode extends ViewNode<RepositoriesView> implements PageableVi
 
 		this._reflog = reflog;
 		this.limit = reflog?.count;
-		this.triggerChange(false);
+		void this.triggerChange(false);
 	}
 }

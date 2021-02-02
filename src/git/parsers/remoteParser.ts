@@ -52,12 +52,12 @@ export class GitRemoteParser {
 	static parse(
 		data: string,
 		repoPath: string,
-		providerFactory: (domain: string, path: string) => RemoteProvider | undefined
+		providerFactory: (domain: string, path: string) => RemoteProvider | undefined,
 	): GitRemote[] | undefined {
 		if (!data) return undefined;
 
 		const remotes: GitRemote[] = [];
-		const groups = Object.create(null);
+		const groups = Object.create(null) as Record<string, GitRemote | undefined>;
 
 		let name;
 		let url;
@@ -97,13 +97,13 @@ export class GitRemoteParser {
 					provider !== undefined ? provider.path : path,
 					provider,
 					// Stops excessive memory usage -- https://bugs.chromium.org/p/v8/issues/detail?id=2869
-					[{ url: url, type: ` ${type}`.substr(1) as GitRemoteType }]
+					[{ url: url, type: ` ${type}`.substr(1) as GitRemoteType }],
 				);
 				remotes.push(remote);
 				groups[uniqueness] = remote;
 			} else {
 				// Stops excessive memory usage -- https://bugs.chromium.org/p/v8/issues/detail?id=2869
-				remote.types.push({ url: url, type: ` ${type}`.substr(1) as GitRemoteType });
+				remote.urls.push({ url: url, type: ` ${type}`.substr(1) as GitRemoteType });
 			}
 		} while (true);
 
@@ -117,7 +117,7 @@ export class GitRemoteParser {
 		return [
 			match[1] || match[3] || match[6],
 			match[2] || match[4] || match[5] || match[7] || match[8],
-			match[9].replace(/\.git\/?$/, emptyStr)
+			match[9].replace(/\.git\/?$/, emptyStr),
 		];
 	}
 }

@@ -7,10 +7,9 @@ import {
 	onIpcCommand,
 	ReadyCommandType,
 	SettingsDidRequestJumpToNotificationType,
-	SettingsState
+	SettingsState,
 } from './protocol';
 import { WebviewBase } from './webviewBase';
-import { applyViewLayoutPreset } from './helpers';
 
 const anchorRegex = /.*?#(.*)/;
 
@@ -20,14 +19,20 @@ export class SettingsWebview extends WebviewBase {
 	constructor() {
 		super(Commands.ShowSettingsPage);
 
-		this._disposable = Disposable.from(
-			this._disposable,
+		this.disposable = Disposable.from(
+			this.disposable,
 			...[
-				Commands.ShowSettingsPageAndJumpToCompareView,
+				Commands.ShowSettingsPageAndJumpToBranchesView,
+				Commands.ShowSettingsPageAndJumpToCommitsView,
+				Commands.ShowSettingsPageAndJumpToContributorsView,
 				Commands.ShowSettingsPageAndJumpToFileHistoryView,
 				Commands.ShowSettingsPageAndJumpToLineHistoryView,
+				Commands.ShowSettingsPageAndJumpToRemotesView,
 				Commands.ShowSettingsPageAndJumpToRepositoriesView,
-				Commands.ShowSettingsPageAndJumpToSearchCommitsView
+				Commands.ShowSettingsPageAndJumpToSearchAndCompareView,
+				Commands.ShowSettingsPageAndJumpToStashesView,
+				Commands.ShowSettingsPageAndJumpToTagsView,
+				Commands.ShowSettingsPageAndJumpToViews,
 			].map(c => {
 				// The show and jump commands are structured to have a # separating the base command from the anchor
 				let anchor: string | undefined;
@@ -37,7 +42,7 @@ export class SettingsWebview extends WebviewBase {
 				}
 
 				return commands.registerCommand(c, () => this.onShowCommand(anchor), this);
-			})
+			}),
 		);
 	}
 
@@ -51,9 +56,11 @@ export class SettingsWebview extends WebviewBase {
 	protected onMessageReceived(e: IpcMessage) {
 		switch (e.method) {
 			case ReadyCommandType.method:
-				onIpcCommand(ReadyCommandType, e, params => {
+				onIpcCommand(ReadyCommandType, e, _params => {
 					if (this._pendingJumpToAnchor !== undefined) {
-						this.notify(SettingsDidRequestJumpToNotificationType, { anchor: this._pendingJumpToAnchor });
+						void this.notify(SettingsDidRequestJumpToNotificationType, {
+							anchor: this._pendingJumpToAnchor,
+						});
 						this._pendingJumpToAnchor = undefined;
 					}
 				});
@@ -81,22 +88,19 @@ export class SettingsWebview extends WebviewBase {
 
 	renderEndOfBody() {
 		const scopes: ['user' | 'workspace', string][] = [['user', 'User']];
-		if (workspace.workspaceFolders !== undefined && workspace.workspaceFolders.length) {
+		if (workspace.workspaceFolders?.length) {
 			scopes.push(['workspace', 'Workspace']);
 		}
 
 		const bootstrap: SettingsState = {
 			// Make sure to get the raw config, not from the container which has the modes mixed in
 			config: configuration.get(),
+			customSettings: this.getCustomSettings(),
 			scope: 'user',
-			scopes: scopes
+			scopes: scopes,
 		};
 		return `<script type="text/javascript" nonce="Z2l0bGVucy1ib290c3RyYXA=">window.bootstrap = ${JSON.stringify(
-			bootstrap
+			bootstrap,
 		)};</script>`;
-	}
-
-	registerCommands() {
-		return [commands.registerCommand(`${this.id}.applyViewLayoutPreset`, applyViewLayoutPreset, this)];
 	}
 }

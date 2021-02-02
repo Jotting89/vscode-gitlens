@@ -1,10 +1,11 @@
 'use strict';
 import { ThemeIcon, TreeItem, TreeItemCollapsibleState } from 'vscode';
 import { ViewFilesLayout, ViewsFilesConfig } from '../../configuration';
-import { GitUri } from '../../git/gitService';
+import { GitUri } from '../../git/gitUri';
+import { StashesView } from '../stashesView';
 import { Arrays } from '../../system';
-import { ViewWithFiles } from '../viewBase';
-import { ResourceType, ViewNode } from './viewNode';
+import { ViewsWithCommits } from '../viewBase';
+import { ContextValues, ViewNode } from './viewNode';
 
 export interface FileNode extends ViewNode {
 	folderName: string;
@@ -14,17 +15,17 @@ export interface FileNode extends ViewNode {
 	root?: Arrays.HierarchicalItem<FileNode>;
 }
 
-export class FolderNode extends ViewNode<ViewWithFiles> {
+export class FolderNode extends ViewNode<ViewsWithCommits | StashesView> {
 	readonly priority: number = 1;
 
 	constructor(
-		view: ViewWithFiles,
+		view: ViewsWithCommits | StashesView,
 		parent: ViewNode,
 		public readonly repoPath: string,
 		public readonly folderName: string,
 		public readonly root: Arrays.HierarchicalItem<FileNode>,
 		private readonly containsWorkingFiles?: boolean,
-		public readonly relativePath?: string
+		public readonly relativePath?: string,
 	) {
 		super(GitUri.fromRepoPath(repoPath), view, parent);
 	}
@@ -41,7 +42,7 @@ export class FolderNode extends ViewNode<ViewWithFiles> {
 		const nesting = FolderNode.getFileNesting(
 			this.view.config.files,
 			this.root.descendants,
-			this.relativePath === undefined
+			this.relativePath === undefined,
 		);
 		if (nesting === ViewFilesLayout.List) {
 			this.root.descendants.forEach(n => (n.relativePath = this.root.relativePath));
@@ -58,8 +59,8 @@ export class FolderNode extends ViewNode<ViewWithFiles> {
 							folder.name,
 							folder,
 							this.containsWorkingFiles,
-							folder.relativePath
-						)
+							folder.relativePath,
+						),
 					);
 					continue;
 				}
@@ -84,7 +85,7 @@ export class FolderNode extends ViewNode<ViewWithFiles> {
 
 	getTreeItem(): TreeItem {
 		const item = new TreeItem(this.label, TreeItemCollapsibleState.Expanded);
-		item.contextValue = ResourceType.Folder;
+		item.contextValue = ContextValues.Folder;
 		if (this.containsWorkingFiles) {
 			item.contextValue += '+working';
 		}
@@ -100,7 +101,7 @@ export class FolderNode extends ViewNode<ViewWithFiles> {
 	static getFileNesting<T extends FileNode>(
 		config: ViewsFilesConfig,
 		children: T[],
-		isRoot: boolean
+		isRoot: boolean,
 	): ViewFilesLayout {
 		const nesting = config.layout || ViewFilesLayout.Auto;
 		if (nesting === ViewFilesLayout.Auto) {

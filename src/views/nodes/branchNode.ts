@@ -1,35 +1,86 @@
 'use strict';
-import { TreeItem, TreeItemCollapsibleState } from 'vscode';
-import { ViewBranchesLayout } from '../../configuration';
-import { GlyphChars } from '../../constants';
-import { Container } from '../../container';
-import { BranchDateFormatting, GitBranch, GitLog, GitRemoteType, GitUri } from '../../git/gitService';
-import { debug, gate, Iterables, log, Strings } from '../../system';
-import { RepositoriesView } from '../repositoriesView';
+import { MarkdownString, ThemeColor, ThemeIcon, TreeItem, TreeItemCollapsibleState, window } from 'vscode';
+import { BranchesView } from '../branchesView';
 import { BranchTrackingStatusNode } from './branchTrackingStatusNode';
 import { CommitNode } from './commitNode';
-import { MessageNode, ShowMoreNode } from './common';
+import { CommitsView } from '../commitsView';
+import { LoadMoreNode, MessageNode } from './common';
+import { CompareBranchNode } from './compareBranchNode';
+import { ViewBranchesLayout, ViewShowBranchComparison } from '../../configuration';
+import { Colors, GlyphChars } from '../../constants';
+import { Container } from '../../container';
+import {
+	BranchDateFormatting,
+	GitBranch,
+	GitBranchReference,
+	GitLog,
+	GitRemote,
+	GitRemoteType,
+	PullRequestState,
+} from '../../git/git';
+import { GitUri } from '../../git/gitUri';
 import { insertDateMarkers } from './helpers';
-import { PageableViewNode, ResourceType, ViewNode, ViewRefNode } from './viewNode';
+import { MergeStatusNode } from './mergeStatusNode';
+import { PullRequestNode } from './pullRequestNode';
+import { RebaseStatusNode } from './rebaseStatusNode';
+import { RemotesView } from '../remotesView';
+import { RepositoriesView } from '../repositoriesView';
 import { RepositoryNode } from './repositoryNode';
+import { debug, gate, Iterables, log, Strings } from '../../system';
+import { ContextValues, PageableViewNode, ViewNode, ViewRefNode } from './viewNode';
 
-export class BranchNode extends ViewRefNode<RepositoriesView> implements PageableViewNode {
+export class BranchNode
+	extends ViewRefNode<BranchesView | CommitsView | RemotesView | RepositoriesView, GitBranchReference>
+	implements PageableViewNode {
 	static key = ':branch';
 	static getId(repoPath: string, name: string, root: boolean): string {
 		return `${RepositoryNode.getId(repoPath)}${this.key}(${name})${root ? ':root' : ''}`;
 	}
 
 	private _children: ViewNode[] | undefined;
+	private readonly options: {
+		expanded: boolean;
+		showAsCommits: boolean;
+		showComparison: false | ViewShowBranchComparison;
+		showCurrent: boolean;
+		showStatus: boolean;
+		showTracking: boolean;
+		authors?: string[];
+	};
+	protected splatted = true;
 
 	constructor(
 		uri: GitUri,
-		view: RepositoriesView,
+		view: BranchesView | CommitsView | RemotesView | RepositoriesView,
 		parent: ViewNode,
 		public readonly branch: GitBranch,
-		// Specifies that the node is shown as a root under the repository node
-		public readonly root: boolean = false
+		// Specifies that the node is shown as a root
+		public readonly root: boolean,
+
+		options?: {
+			expanded?: boolean;
+			showAsCommits?: boolean;
+			showComparison?: false | ViewShowBranchComparison;
+			showCurrent?: boolean;
+			showStatus?: boolean;
+			showTracking?: boolean;
+			authors?: string[];
+		},
 	) {
 		super(uri, view, parent);
+
+		this.options = {
+			expanded: false,
+			showAsCommits: false,
+			showComparison: false,
+			// Hide the current branch checkmark when the node is displayed as a root
+			showCurrent: !this.root,
+			// Don't show merge/rebase status info the node is displayed as a root
+			showStatus: true, //!this.root,
+			// Don't show tracking info the node is displayed as a root
+			showTracking: !this.root,
+			...options,
+		};
 	}
 
 	toClipboard(): string {
@@ -47,63 +98,172 @@ export class BranchNode extends ViewRefNode<RepositoriesView> implements Pageabl
 	}
 
 	get label(): string {
-		const branchName = this.branch.getName();
-		if (this.view.config.branches.layout === ViewBranchesLayout.List) return branchName;
+		if (this.options.showAsCommits) return 'Commits';
 
-		return this.compacted || this.root || this.current || this.branch.detached || this.branch.starred
-			? branchName
-			: this.branch.getBasename();
+		const branchName = this.branch.getNameWithoutRemote();
+		return `${
+			this.view.config.branches?.layout !== ViewBranchesLayout.Tree ||
+			this.compacted ||
+			this.root ||
+			this.current ||
+			this.branch.detached ||
+			this.branch.starred
+				? branchName
+				: this.branch.getBasename()
+		}${this.branch.rebasing ? ' (Rebasing)' : ''}`;
 	}
 
-	get ref(): string {
-		return this.branch.ref;
+	get ref(): GitBranchReference {
+		return this.branch;
 	}
 
 	get treeHierarchy(): string[] {
 		return this.root || this.current || this.branch.detached || this.branch.starred
 			? [this.branch.name]
-			: this.branch.getName().split('/');
+			: this.branch.getNameWithoutRemote().split('/');
 	}
 
 	async getChildren(): Promise<ViewNode[]> {
-		if (this._children === undefined) {
+		if (this._children == null) {
 			const children = [];
-			if (!this.root && this.branch.tracking) {
+
+			const range = await Container.git.getBranchAheadRange(this.branch);
+			const [
+				log,
+				getBranchAndTagTips,
+				status,
+				mergeStatus,
+				rebaseStatus,
+				pr,
+				unpublishedCommits,
+			] = await Promise.all([
+				this.getLog(),
+				Container.git.getBranchesAndTagsTipsFn(this.uri.repoPath, this.branch.name),
+				this.options.showStatus && this.branch.current
+					? Container.git.getStatusForRepo(this.uri.repoPath)
+					: undefined,
+				this.options.showStatus && this.branch.current
+					? Container.git.getMergeStatus(this.uri.repoPath!)
+					: undefined,
+				this.options.showStatus ? Container.git.getRebaseStatus(this.uri.repoPath!) : undefined,
+				this.view.config.pullRequests.enabled &&
+				this.view.config.pullRequests.showForBranches &&
+				(this.branch.tracking || this.branch.remote)
+					? this.branch.getAssociatedPullRequest(this.root ? { include: [PullRequestState.Open] } : undefined)
+					: undefined,
+				range && !this.branch.remote
+					? Container.git.getLogRefsOnly(this.uri.repoPath!, {
+							limit: 0,
+							ref: range,
+					  })
+					: undefined,
+			]);
+			if (log == null) return [new MessageNode(this.view, this, 'No commits could be found.')];
+
+			if (this.options.showComparison !== false && !(this.view instanceof RemotesView)) {
+				children.push(
+					new CompareBranchNode(
+						this.uri,
+						this.view,
+						this,
+						this.branch,
+						this.options.showComparison,
+						this.splatted,
+					),
+				);
+			}
+
+			if (pr != null) {
+				children.push(new PullRequestNode(this.view, this, pr, this.branch));
+			}
+
+			if (this.options.showStatus && mergeStatus != null) {
+				children.push(
+					new MergeStatusNode(
+						this.view,
+						this,
+						this.branch,
+						mergeStatus,
+						status ?? (await Container.git.getStatusForRepo(this.uri.repoPath)),
+						this.root,
+					),
+				);
+			} else if (
+				this.options.showStatus &&
+				rebaseStatus != null &&
+				(this.branch.current || this.branch.name === rebaseStatus.incoming.name)
+			) {
+				children.push(
+					new RebaseStatusNode(
+						this.view,
+						this,
+						this.branch,
+						rebaseStatus,
+						status ?? (await Container.git.getStatusForRepo(this.uri.repoPath)),
+						this.root,
+					),
+				);
+			} else if (this.options.showTracking) {
 				const status = {
 					ref: this.branch.ref,
 					repoPath: this.branch.repoPath,
 					state: this.branch.state,
-					upstream: this.branch.tracking
+					upstream: this.branch.tracking,
 				};
 
-				if (this.branch.state.behind) {
-					children.push(new BranchTrackingStatusNode(this.view, this, this.branch, status, 'behind'));
-				}
+				if (this.branch.tracking) {
+					if (this.root && !status.state.behind && !status.state.ahead) {
+						children.push(
+							new BranchTrackingStatusNode(this.view, this, this.branch, status, 'same', this.root),
+						);
+					} else {
+						if (status.state.behind) {
+							children.push(
+								new BranchTrackingStatusNode(this.view, this, this.branch, status, 'behind', this.root),
+							);
+						}
 
-				if (this.branch.state.ahead) {
-					children.push(new BranchTrackingStatusNode(this.view, this, this.branch, status, 'ahead'));
+						if (status.state.ahead) {
+							children.push(
+								new BranchTrackingStatusNode(this.view, this, this.branch, status, 'ahead', this.root),
+							);
+						}
+					}
+				} else {
+					children.push(
+						new BranchTrackingStatusNode(this.view, this, this.branch, status, 'none', this.root),
+					);
 				}
 			}
 
-			const log = await this.getLog();
-			if (log === undefined) return [new MessageNode(this.view, this, 'No commits could be found.')];
+			if (children.length !== 0) {
+				children.push(new MessageNode(this.view, this, '', GlyphChars.Dash.repeat(2), ''));
+			}
 
-			const getBranchAndTagTips = await Container.git.getBranchesAndTagsTipsFn(
-				this.uri.repoPath,
-				this.branch.name
-			);
 			children.push(
 				...insertDateMarkers(
 					Iterables.map(
 						log.commits.values(),
-						c => new CommitNode(this.view, this, c, this.branch, getBranchAndTagTips)
+						c =>
+							new CommitNode(
+								this.view,
+								this,
+								c,
+								unpublishedCommits?.has(c.ref),
+								this.branch,
+								getBranchAndTagTips,
+							),
 					),
-					this
-				)
+					this,
+				),
 			);
 
 			if (log.hasMore) {
-				children.push(new ShowMoreNode(this.view, this, 'Commits', children[children.length - 1]));
+				children.push(
+					new LoadMoreNode(this.view, this, children[children.length - 1], undefined, () =>
+						Container.git.getCommitCount(this.branch.repoPath, this.branch.name),
+					),
+				);
 			}
 
 			this._children = children;
@@ -112,11 +272,13 @@ export class BranchNode extends ViewRefNode<RepositoriesView> implements Pageabl
 	}
 
 	async getTreeItem(): Promise<TreeItem> {
-		const name = this.label;
-		let tooltip = `${this.branch.getName()}${this.current ? ' (current)' : ''}`;
-		let iconSuffix = '';
+		this.splatted = false;
 
-		let contextValue: string = ResourceType.Branch;
+		let tooltip: string | MarkdownString = `${
+			this.current ? 'Current branch' : 'Branch'
+		} $(git-branch) ${this.branch.getNameWithoutRemote()}${this.branch.rebasing ? ' (Rebasing)' : ''}`;
+
+		let contextValue: string = ContextValues.Branch;
 		if (this.current) {
 			contextValue += '+current';
 		}
@@ -129,17 +291,22 @@ export class BranchNode extends ViewRefNode<RepositoriesView> implements Pageabl
 		if (this.branch.tracking) {
 			contextValue += '+tracking';
 		}
+		if (this.options.showAsCommits) {
+			contextValue += '+commits';
+		}
 
+		let color: ThemeColor | undefined;
 		let description;
-		if (!this.branch.remote && this.branch.tracking !== undefined) {
-			if (this.view.config.showTrackingBranch) {
+		let iconSuffix = '';
+		if (!this.branch.remote) {
+			if (this.branch.tracking != null) {
 				let arrows = GlyphChars.Dash;
 
 				const remote = await this.branch.getRemote();
-				if (remote !== undefined) {
+				if (remote != null) {
 					let left;
 					let right;
-					for (const { type } of remote.types) {
+					for (const { type } of remote.urls) {
 						if (type === GitRemoteType.Fetch) {
 							left = true;
 
@@ -160,49 +327,79 @@ export class BranchNode extends ViewRefNode<RepositoriesView> implements Pageabl
 					}
 				}
 
-				description = `${this.branch.getTrackingStatus({ suffix: `${GlyphChars.Space} ` })}${arrows}${
-					GlyphChars.Space
-				} ${this.branch.tracking}`;
-			}
-			tooltip += ` is tracking ${this.branch.tracking}\n${this.branch.getTrackingStatus({
-				empty: 'up-to-date',
-				expand: true,
-				separator: '\n'
-			})}`;
+				description = this.options.showAsCommits
+					? `${this.branch.getTrackingStatus({
+							suffix: Strings.pad(GlyphChars.Dot, 1, 1),
+					  })}${this.branch.getNameWithoutRemote()}${this.branch.rebasing ? ' (Rebasing)' : ''}${Strings.pad(
+							arrows,
+							2,
+							2,
+					  )}${this.branch.tracking}`
+					: `${this.branch.getTrackingStatus({ suffix: `${GlyphChars.Space} ` })}${arrows}${
+							GlyphChars.Space
+					  } ${this.branch.tracking}`;
 
-			if (this.branch.state.ahead || this.branch.state.behind) {
-				if (this.branch.state.behind) {
-					contextValue += '+behind';
-					iconSuffix = '-red';
+				tooltip += ` is ${this.branch.getTrackingStatus({
+					empty: `up to date with $(git-branch) ${this.branch.tracking}${
+						remote?.provider?.name ? ` on ${remote.provider.name}` : ''
+					}`,
+					expand: true,
+					icons: true,
+					separator: ', ',
+					suffix: ` $(git-branch) ${this.branch.tracking}${
+						remote?.provider?.name ? ` on ${remote.provider.name}` : ''
+					}`,
+				})}`;
+
+				if (this.branch.state.ahead || this.branch.state.behind) {
+					if (this.branch.state.ahead) {
+						contextValue += '+ahead';
+						color = new ThemeColor(Colors.UnpushlishedChangesIconColor);
+						iconSuffix = '-green';
+					}
+					if (this.branch.state.behind) {
+						contextValue += '+behind';
+						color = new ThemeColor(Colors.UnpulledChangesIconColor);
+						iconSuffix = this.branch.state.ahead ? '-yellow' : '-red';
+					}
 				}
-				if (this.branch.state.ahead) {
-					contextValue += '+ahead';
-					iconSuffix = this.branch.state.behind ? '-yellow' : '-green';
-				}
+			} else {
+				const providers = GitRemote.getHighlanderProviders(
+					await Container.git.getRemotes(this.branch.repoPath),
+				);
+				const providerName = providers?.length ? providers[0].name : undefined;
+
+				tooltip += ` hasn't been published to ${providerName ?? 'a remote'}`;
 			}
 		}
 
-		if (this.branch.date !== undefined) {
+		if (this.branch.date != null) {
 			description = `${description ? `${description}${Strings.pad(GlyphChars.Dot, 2, 2)}` : ''}${
 				this.branch.formattedDate
 			}`;
 
-			tooltip += `\nLast commit ${this.branch.formatDateFromNow()} (${this.branch.formatDate(
-				BranchDateFormatting.dateFormat
+			tooltip += `\n\nLast commit ${this.branch.formatDateFromNow()} (${this.branch.formatDate(
+				BranchDateFormatting.dateFormat,
 			)})`;
 		}
 
+		tooltip = new MarkdownString(tooltip, true);
+		if (this.branch.starred) {
+			tooltip.appendMarkdown('\\\n$(star-full) Favorited');
+		}
+
 		const item = new TreeItem(
-			// Hide the current branch checkmark when the node is displayed as a root under the repository node
-			`${!this.root && this.current ? `${GlyphChars.Check} ${GlyphChars.Space}` : ''}${name}`,
-			TreeItemCollapsibleState.Collapsed
+			`${this.options.showCurrent && this.current ? Strings.pad(GlyphChars.Check, 0, 2) : ''}${this.label}`,
+			this.options.expanded ? TreeItemCollapsibleState.Expanded : TreeItemCollapsibleState.Collapsed,
 		);
+		item.iconPath = this.options.showAsCommits
+			? new ThemeIcon('git-commit', color)
+			: {
+					dark: Container.context.asAbsolutePath(`images/dark/icon-branch${iconSuffix}.svg`),
+					light: Container.context.asAbsolutePath(`images/light/icon-branch${iconSuffix}.svg`),
+			  };
 		item.contextValue = contextValue;
 		item.description = description;
-		item.iconPath = {
-			dark: Container.context.asAbsolutePath(`images/dark/icon-branch${iconSuffix}.svg`),
-			light: Container.context.asAbsolutePath(`images/light/icon-branch${iconSuffix}.svg`)
-		};
 		item.id = this.id;
 		item.tooltip = tooltip;
 
@@ -212,13 +409,13 @@ export class BranchNode extends ViewRefNode<RepositoriesView> implements Pageabl
 	@log()
 	async star() {
 		await this.branch.star();
-		void this.parent!.triggerChange();
+		void this.view.refresh(true);
 	}
 
 	@log()
 	async unstar() {
 		await this.branch.unstar();
-		void this.parent!.triggerChange();
+		void this.view.refresh(true);
 	}
 
 	@gate()
@@ -232,10 +429,17 @@ export class BranchNode extends ViewRefNode<RepositoriesView> implements Pageabl
 
 	private _log: GitLog | undefined;
 	private async getLog() {
-		if (this._log === undefined) {
+		if (this._log == null) {
+			let limit = this.limit ?? (this.root ? this.view.config.pageItemLimit : this.view.config.defaultItemLimit);
+			// Try to show more commits if they are unpublished
+			if (limit !== 0 && this.branch.state.ahead > limit) {
+				limit = Math.min(this.branch.state.ahead + 1, limit * 2);
+			}
+
 			this._log = await Container.git.getLog(this.uri.repoPath!, {
-				limit: this.limit ?? this.view.config.defaultItemLimit,
-				ref: this.ref
+				limit: limit,
+				ref: this.ref.ref,
+				authors: this.options?.authors,
 			});
 		}
 
@@ -247,15 +451,23 @@ export class BranchNode extends ViewRefNode<RepositoriesView> implements Pageabl
 	}
 
 	limit: number | undefined = this.view.getNodeLastKnownLimit(this);
-	async showMore(limit?: number | { until?: any }) {
-		let log = await this.getLog();
-		if (log === undefined || !log.hasMore) return;
+	@gate()
+	async loadMore(limit?: number | { until?: any }) {
+		let log = await window.withProgress(
+			{
+				location: { viewId: this.view.id },
+			},
+			() => this.getLog(),
+		);
+		if (log == null || !log.hasMore) return;
 
 		log = await log.more?.(limit ?? this.view.config.pageItemLimit);
 		if (this._log === log) return;
 
 		this._log = log;
 		this.limit = log?.count;
-		this.triggerChange(false);
+
+		this._children = undefined;
+		void this.triggerChange(false);
 	}
 }

@@ -1,23 +1,22 @@
 'use strict';
-import { commands, Uri } from 'vscode';
-import { Container } from '../container';
-import { GitUri } from '../git/gitUri';
-import { CommandQuickPickItem } from '../quickpicks';
+import { Uri } from 'vscode';
+import { GitActions } from '../commands';
 import {
-	command,
 	Command,
+	command,
 	CommandContext,
 	Commands,
-	isCommandViewContextWithFile,
-	isCommandViewContextWithRepo,
-	isCommandViewContextWithRepoPath
+	isCommandContextViewNodeHasFile,
+	isCommandContextViewNodeHasRepoPath,
+	isCommandContextViewNodeHasRepository,
 } from './common';
-import { GitCommandsCommandArgs } from '../commands';
+import { Container } from '../container';
+import { GitUri } from '../git/gitUri';
 
 const enum ResourceGroupType {
 	Merge,
 	Index,
-	WorkingTree
+	WorkingTree,
 }
 
 export interface StashSaveCommandArgs {
@@ -25,8 +24,6 @@ export interface StashSaveCommandArgs {
 	repoPath?: string;
 	uris?: Uri[];
 	keepStaged?: boolean;
-
-	goBackCommand?: CommandQuickPickItem;
 }
 
 @command()
@@ -35,59 +32,48 @@ export class StashSaveCommand extends Command {
 		super([Commands.StashSave, Commands.StashSaveFiles]);
 	}
 
-	protected preExecute(context: CommandContext, args?: StashSaveCommandArgs) {
-		if (isCommandViewContextWithFile(context)) {
+	protected async preExecute(context: CommandContext, args?: StashSaveCommandArgs) {
+		if (isCommandContextViewNodeHasFile(context)) {
 			args = { ...args };
-			args.repoPath = context.node.file.repoPath || context.node.repoPath;
+			args.repoPath = context.node.file.repoPath ?? context.node.repoPath;
 			args.uris = [GitUri.fromFile(context.node.file, args.repoPath)];
-		} else if (isCommandViewContextWithRepo(context)) {
+		} else if (isCommandContextViewNodeHasRepository(context)) {
 			args = { ...args };
 			args.repoPath = context.node.repo.path;
-		} else if (isCommandViewContextWithRepoPath(context)) {
+		} else if (isCommandContextViewNodeHasRepoPath(context)) {
 			args = { ...args };
 			args.repoPath = context.node.repoPath;
 		} else if (context.type === 'scm-states') {
 			args = { ...args };
-
-			if (!context.scmResourceStates.some(s => (s as any).resourceGroupType === ResourceGroupType.Index)) {
-				args.keepStaged = true;
-			}
-
 			args.uris = context.scmResourceStates.map(s => s.resourceUri);
+			args.repoPath = await Container.git.getRepoPath(args.uris[0].fsPath);
+
+			const status = await Container.git.getStatusForRepo(args.repoPath);
+			if (status?.computeWorkingTreeStatus().staged) {
+				if (!context.scmResourceStates.some(s => (s as any).resourceGroupType === ResourceGroupType.Index)) {
+					args.keepStaged = true;
+				}
+			}
 		} else if (context.type === 'scm-groups') {
 			args = { ...args };
-
-			if (!context.scmResourceGroups.some(g => g.id === 'index')) {
-				args.keepStaged = true;
-			}
-
 			args.uris = context.scmResourceGroups.reduce<Uri[]>(
 				(a, b) => a.concat(b.resourceStates.map(s => s.resourceUri)),
-				[]
+				[],
 			);
+			args.repoPath = await Container.git.getRepoPath(args.uris[0].fsPath);
+
+			const status = await Container.git.getStatusForRepo(args.repoPath);
+			if (status?.computeWorkingTreeStatus().staged) {
+				if (!context.scmResourceGroups.some(g => g.id === 'index')) {
+					args.keepStaged = true;
+				}
+			}
 		}
 
 		return this.execute(args);
 	}
 
-	async execute(args?: StashSaveCommandArgs) {
-		args = { ...args };
-
-		let repo;
-		if (args.uris !== undefined || args.repoPath !== undefined) {
-			repo = await Container.git.getRepository((args.uris && args.uris[0]) || args.repoPath!);
-		}
-
-		const gitCommandArgs: GitCommandsCommandArgs = {
-			command: 'stash',
-			state: {
-				subcommand: 'push',
-				repo: repo,
-				message: args.message,
-				uris: args.uris,
-				flags: args.keepStaged ? ['--keep-index'] : undefined
-			}
-		};
-		return commands.executeCommand(Commands.GitCommands, gitCommandArgs);
+	execute(args?: StashSaveCommandArgs) {
+		return GitActions.Stash.push(args?.repoPath, args?.uris, args?.message, args?.keepStaged);
 	}
 }

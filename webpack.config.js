@@ -1,44 +1,104 @@
-'use strict';
+//@ts-check
+/** @typedef {import('webpack').Configuration} WebpackConfig **/
+
 /* eslint-disable @typescript-eslint/no-var-requires */
-const fs = require('fs');
+/* eslint-disable @typescript-eslint/strict-boolean-expressions */
+/* eslint-disable @typescript-eslint/prefer-optional-chain */
+'use strict';
 const path = require('path');
-const glob = require('glob');
 const BundleAnalyzerPlugin = require('webpack-bundle-analyzer').BundleAnalyzerPlugin;
 const { CleanWebpackPlugin: CleanPlugin } = require('clean-webpack-plugin');
 const CircularDependencyPlugin = require('circular-dependency-plugin');
+const CopyPlugin = require('copy-webpack-plugin');
 const CspHtmlPlugin = require('csp-html-webpack-plugin');
 const ForkTsCheckerPlugin = require('fork-ts-checker-webpack-plugin');
-const HtmlExcludeAssetsPlugin = require('html-webpack-exclude-assets-plugin');
-const HtmlInlineSourcePlugin = require('html-webpack-inline-source-plugin');
 const HtmlPlugin = require('html-webpack-plugin');
-const ImageminPlugin = require('imagemin-webpack-plugin').default;
+const HtmlSkipAssetsPlugin = require('html-webpack-skip-assets-plugin').HtmlWebpackSkipAssetsPlugin;
+const ImageMinimizerPlugin = require('image-minimizer-webpack-plugin');
 const MiniCssExtractPlugin = require('mini-css-extract-plugin');
 const TerserPlugin = require('terser-webpack-plugin');
 
-module.exports = function(env, argv) {
-	env = env || {};
-	env.analyzeBundle = Boolean(env.analyzeBundle);
-	env.analyzeDeps = Boolean(env.analyzeDeps);
-	env.production = env.analyzeBundle || Boolean(env.production);
-	env.optimizeImages = Boolean(env.optimizeImages) || (env.production && !env.analyzeBundle);
-
-	if (!env.optimizeImages && !fs.existsSync(path.resolve(__dirname, 'images/settings'))) {
-		env.optimizeImages = true;
+class InlineChunkHtmlPlugin {
+	constructor(htmlPlugin, patterns) {
+		this.htmlPlugin = htmlPlugin;
+		this.patterns = patterns;
 	}
 
-	return [getExtensionConfig(env), getWebviewsConfig(env)];
-};
+	getInlinedTag(publicPath, assets, tag) {
+		if (
+			(tag.tagName !== 'script' || !(tag.attributes && tag.attributes.src)) &&
+			(tag.tagName !== 'link' || !(tag.attributes && tag.attributes.href))
+		) {
+			return tag;
+		}
 
-function getExtensionConfig(env) {
+		let chunkName = tag.tagName === 'link' ? tag.attributes.href : tag.attributes.src;
+		if (publicPath) {
+			chunkName = chunkName.replace(publicPath, '');
+		}
+		if (!this.patterns.some(pattern => chunkName.match(pattern))) {
+			return tag;
+		}
+
+		const asset = assets[chunkName];
+		if (asset == null) {
+			return tag;
+		}
+
+		return { tagName: tag.tagName === 'link' ? 'style' : tag.tagName, innerHTML: asset.source(), closeTag: true };
+	}
+
+	apply(compiler) {
+		let publicPath = compiler.options.output.publicPath || '';
+		if (publicPath && !publicPath.endsWith('/')) {
+			publicPath += '/';
+		}
+
+		compiler.hooks.compilation.tap('InlineChunkHtmlPlugin', compilation => {
+			const getInlinedTagFn = tag => this.getInlinedTag(publicPath, compilation.assets, tag);
+
+			this.htmlPlugin.getHooks(compilation).alterAssetTagGroups.tap('InlineChunkHtmlPlugin', assets => {
+				assets.headTags = assets.headTags.map(getInlinedTagFn);
+				assets.bodyTags = assets.bodyTags.map(getInlinedTagFn);
+			});
+		});
+	}
+}
+
+module.exports =
 	/**
-	 * @type any[]
+	 * @param {{ analyzeBundle?: boolean; analyzeDeps?: boolean; } | undefined } env
+	 * @param {{ mode: 'production' | 'development' | 'none' | undefined; }} argv
+	 * @returns { WebpackConfig[] }
+	 */
+	function (env, argv) {
+		const mode = argv.mode || 'none';
+
+		env = {
+			analyzeBundle: false,
+			analyzeDeps: false,
+			...env,
+		};
+
+		return [getExtensionConfig(mode, env), getWebviewsConfig(mode, env)];
+	};
+
+/**
+ * @param { 'production' | 'development' | 'none' } mode
+ * @param {{ analyzeBundle?: boolean; analyzeDeps?: boolean; }} env
+ * @returns { WebpackConfig }
+ */
+function getExtensionConfig(mode, env) {
+	/**
+	 * @type WebpackConfig['plugins'] | any
 	 */
 	const plugins = [
-		new CleanPlugin({ cleanOnceBeforeBuildPatterns: ['**/*', '!**/webviews/**'] }),
+		new CleanPlugin({ cleanOnceBeforeBuildPatterns: ['!webviews/**'] }),
 		new ForkTsCheckerPlugin({
 			async: false,
-			eslint: true
-		})
+			eslint: { enabled: true, files: 'src/**/*.ts', options: { cache: true } },
+			formatter: 'basic',
+		}),
 	];
 
 	if (env.analyzeDeps) {
@@ -47,12 +107,12 @@ function getExtensionConfig(env) {
 				cwd: __dirname,
 				exclude: /node_modules/,
 				failOnError: false,
-				onDetected: function({ module: webpackModuleRecord, paths, compilation }) {
+				onDetected: function ({ module: _webpackModuleRecord, paths, compilation }) {
 					if (paths.some(p => p.includes('container.ts'))) return;
 
 					compilation.warnings.push(new Error(paths.join(' -> ')));
-				}
-			})
+				},
+			}),
 		);
 	}
 
@@ -63,240 +123,318 @@ function getExtensionConfig(env) {
 	return {
 		name: 'extension',
 		entry: './src/extension.ts',
-		mode: env.production ? 'production' : 'development',
+		mode: mode,
 		target: 'node',
 		node: {
-			__dirname: false
+			__dirname: false,
 		},
 		devtool: 'source-map',
 		output: {
+			path: path.join(__dirname, 'dist'),
 			libraryTarget: 'commonjs2',
-			filename: 'extension.js'
+			filename: 'gitlens.js',
+			chunkFilename: 'feature-[name].js',
 		},
 		optimization: {
 			minimizer: [
+				// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+				// @ts-ignore
 				new TerserPlugin({
-					cache: true,
 					parallel: true,
-					sourceMap: true,
 					terserOptions: {
-						ecma: 8,
+						ecma: 2019,
 						// Keep the class names otherwise @log won't provide a useful name
-						// eslint-disable-next-line @typescript-eslint/camelcase
 						keep_classnames: true,
-						module: true
-					}
-				})
-			]
+						module: true,
+					},
+				}),
+			],
+			splitChunks: {
+				cacheGroups: {
+					defaultVendors: false,
+				},
+			},
 		},
 		externals: {
-			vscode: 'commonjs vscode'
+			vscode: 'commonjs vscode',
 		},
 		module: {
 			rules: [
 				{
-					exclude: /node_modules|\.d\.ts$/,
+					exclude: /\.d\.ts$/,
+					include: path.join(__dirname, 'src'),
 					test: /\.tsx?$/,
 					use: {
 						loader: 'ts-loader',
 						options: {
 							experimentalWatchApi: true,
-							transpileOnly: true
-						}
-					}
-				}
-			]
+							transpileOnly: true,
+						},
+					},
+				},
+			],
 		},
 		resolve: {
-			extensions: ['.ts', '.tsx', '.js', '.jsx', '.json']
+			alias: {
+				'universal-user-agent': path.join(
+					__dirname,
+					'node_modules',
+					'universal-user-agent',
+					'dist-node',
+					'index.js',
+				),
+			},
+			extensions: ['.ts', '.tsx', '.js', '.jsx', '.json'],
+			symlinks: false,
 		},
 		plugins: plugins,
 		stats: {
-			all: false,
+			preset: 'errors-warnings',
 			assets: true,
-			builtAt: true,
+			colors: true,
 			env: true,
-			errors: true,
+			errorsCount: true,
+			warningsCount: true,
 			timings: true,
-			warnings: true
-		}
+		},
 	};
 }
 
-function getWebviewsConfig(env) {
-	const clean = ['**/*'];
-	if (env.optimizeImages) {
-		console.log('Optimizing images (src/webviews/apps/images/settings/*.png)...');
-		clean.push(path.resolve(__dirname, 'images/settings/*'));
-	}
+/**
+ * @param { 'production' | 'development' | 'none' } mode
+ * @param {{ analyzeBundle?: boolean; analyzeDeps?: boolean; }} _env
+ * @returns { WebpackConfig }
+ */
+function getWebviewsConfig(mode, _env) {
+	const basePath = path.join(__dirname, 'src', 'webviews', 'apps');
 
 	const cspPolicy = {
 		'default-src': "'none'",
-		'img-src': ['vscode-resource:', 'https:', 'data:'],
-		'script-src': ['vscode-resource:', "'nonce-Z2l0bGVucy1ib290c3RyYXA='"],
-		'style-src': ['vscode-resource:']
+		'img-src': ['#{cspSource}', 'https:', 'data:'],
+		'script-src': ['#{cspSource}', "'nonce-Z2l0bGVucy1ib290c3RyYXA='"],
+		'style-src': ['#{cspSource}', "'nonce-Z2l0bGVucy1ib290c3RyYXA='"],
+		'font-src': ['#{cspSource}'],
 	};
 
-	if (!env.production) {
+	if (mode !== 'production') {
 		cspPolicy['script-src'].push("'unsafe-eval'");
 	}
 
 	/**
-	 * @type any[]
+	 * @type WebpackConfig['plugins'] | any
 	 */
 	const plugins = [
-		new CleanPlugin({ cleanOnceBeforeBuildPatterns: clean }),
+		new CleanPlugin(),
 		new ForkTsCheckerPlugin({
-			tsconfig: path.resolve(__dirname, 'tsconfig.webviews.json'),
 			async: false,
-			eslint: true
+			eslint: {
+				enabled: true,
+				files: path.join(basePath, '**', '*.ts'),
+				options: { cache: true },
+			},
+			formatter: 'basic',
+			typescript: {
+				configFile: path.join(basePath, 'tsconfig.json'),
+			},
 		}),
 		new MiniCssExtractPlugin({
-			filename: '[name].css'
+			filename: '[name].css',
 		}),
 		new HtmlPlugin({
-			excludeAssets: [/.+-styles\.js/],
-			excludeChunks: ['welcome'],
-			template: 'settings/index.html',
-			filename: path.resolve(__dirname, 'dist/webviews/settings.html'),
+			template: 'rebase/rebase.html',
+			chunks: ['rebase'],
+			filename: path.join(__dirname, 'dist', 'webviews', 'rebase.html'),
 			inject: true,
-			inlineSource: env.production ? '.css$' : undefined,
+			inlineSource: mode === 'production' ? '.css$' : undefined,
 			cspPlugin: {
 				enabled: true,
 				policy: cspPolicy,
 				nonceEnabled: {
 					'script-src': true,
-					'style-src': true
-				}
+					'style-src': true,
+				},
 			},
-			minify: env.production
-				? {
-						removeComments: true,
-						collapseWhitespace: true,
-						removeRedundantAttributes: false,
-						useShortDoctype: true,
-						removeEmptyAttributes: true,
-						removeStyleLinkTypeAttributes: true,
-						keepClosingSlash: true,
-						minifyCSS: true
-				  }
-				: false
+			minify:
+				mode === 'production'
+					? {
+							removeComments: true,
+							collapseWhitespace: true,
+							removeRedundantAttributes: false,
+							useShortDoctype: true,
+							removeEmptyAttributes: true,
+							removeStyleLinkTypeAttributes: true,
+							keepClosingSlash: true,
+							minifyCSS: true,
+					  }
+					: false,
 		}),
 		new HtmlPlugin({
-			excludeAssets: [/.+-styles\.js/],
-			excludeChunks: ['settings'],
-			template: 'welcome/index.html',
-			filename: path.resolve(__dirname, 'dist/webviews/welcome.html'),
+			template: 'settings/settings.html',
+			chunks: ['settings'],
+			filename: path.join(__dirname, 'dist', 'webviews', 'settings.html'),
 			inject: true,
-			inlineSource: env.production ? '.css$' : undefined,
+			inlineSource: mode === 'production' ? '.css$' : undefined,
 			cspPlugin: {
 				enabled: true,
 				policy: cspPolicy,
 				nonceEnabled: {
 					'script-src': true,
-					'style-src': true
-				}
+					'style-src': true,
+				},
 			},
-			minify: env.production
-				? {
-						removeComments: true,
-						collapseWhitespace: true,
-						removeRedundantAttributes: false,
-						useShortDoctype: true,
-						removeEmptyAttributes: true,
-						removeStyleLinkTypeAttributes: true,
-						keepClosingSlash: true,
-						minifyCSS: true
-				  }
-				: false
+			minify:
+				mode === 'production'
+					? {
+							removeComments: true,
+							collapseWhitespace: true,
+							removeRedundantAttributes: false,
+							useShortDoctype: true,
+							removeEmptyAttributes: true,
+							removeStyleLinkTypeAttributes: true,
+							keepClosingSlash: true,
+							minifyCSS: true,
+					  }
+					: false,
 		}),
-		new HtmlExcludeAssetsPlugin(),
+		new HtmlPlugin({
+			template: 'welcome/welcome.html',
+			chunks: ['welcome'],
+			filename: path.join(__dirname, 'dist', 'webviews', 'welcome.html'),
+			inject: true,
+			inlineSource: mode === 'production' ? '.css$' : undefined,
+			cspPlugin: {
+				enabled: true,
+				policy: cspPolicy,
+				nonceEnabled: {
+					'script-src': true,
+					'style-src': true,
+				},
+			},
+			minify:
+				mode === 'production'
+					? {
+							removeComments: true,
+							collapseWhitespace: true,
+							removeRedundantAttributes: false,
+							useShortDoctype: true,
+							removeEmptyAttributes: true,
+							removeStyleLinkTypeAttributes: true,
+							keepClosingSlash: true,
+							minifyCSS: true,
+					  }
+					: false,
+		}),
+		new HtmlSkipAssetsPlugin({}),
 		new CspHtmlPlugin(),
-		new ImageminPlugin({
-			disable: !env.optimizeImages,
-			externalImages: {
-				context: path.resolve(__dirname, 'src/webviews/apps/images'),
-				sources: glob.sync('src/webviews/apps/images/settings/*.png'),
-				destination: path.resolve(__dirname, 'images')
-			},
-			cacheFolder: path.resolve(__dirname, 'node_modules', '.cache', 'imagemin-webpack-plugin'),
-			gifsicle: null,
-			jpegtran: null,
-			optipng: null,
-			pngquant: {
-				quality: '85-100',
-				speed: env.production ? 1 : 10
-			},
-			svgo: null
+		new InlineChunkHtmlPlugin(HtmlPlugin, mode === 'production' ? ['\\.css$'] : []),
+		new CopyPlugin({
+			patterns: [
+				{
+					from: path.posix.join(basePath.replace(/\\/g, '/'), 'images', 'settings', '*.png'),
+					to: __dirname.replace(/\\/g, '/'),
+				},
+				{
+					from: path.posix.join(
+						__dirname.replace(/\\/g, '/'),
+						'node_modules',
+						'vscode-codicons',
+						'dist',
+						'codicon.ttf',
+					),
+					to: path.posix.join(__dirname.replace(/\\/g, '/'), 'dist', 'webviews'),
+				},
+			],
 		}),
-		new HtmlInlineSourcePlugin()
+		new ImageMinimizerPlugin({
+			test: /\.(png)$/i,
+			filename: '[path][name].webp',
+			loader: false,
+			deleteOriginalAssets: true,
+			minimizerOptions: {
+				plugins: [
+					[
+						'imagemin-webp',
+						{
+							lossless: true,
+							nearLossless: mode === 'production' ? 0 : 100,
+							quality: 100,
+							method: mode === 'production' ? 6 : 0,
+						},
+					],
+				],
+			},
+		}),
 	];
 
 	return {
 		name: 'webviews',
-		context: path.resolve(__dirname, 'src/webviews/apps'),
+		context: basePath,
 		entry: {
-			'main-styles': ['./scss/main.scss'],
-			settings: ['./settings/index.ts'],
-			welcome: ['./welcome/index.ts']
+			rebase: './rebase/rebase.ts',
+			settings: './settings/settings.ts',
+			welcome: './welcome/welcome.ts',
 		},
-		mode: env.production ? 'production' : 'development',
-		devtool: env.production ? undefined : 'eval-source-map',
+		mode: mode,
+		target: 'web',
+		devtool: 'source-map',
 		output: {
 			filename: '[name].js',
-			path: path.resolve(__dirname, 'dist/webviews'),
-			publicPath: '#{root}/dist/webviews/'
+			path: path.join(__dirname, 'dist', 'webviews'),
+			publicPath: '#{root}/dist/webviews/',
 		},
 		module: {
 			rules: [
 				{
-					exclude: /node_modules|\.d\.ts$/,
+					exclude: /\.d\.ts$/,
+					include: path.join(__dirname, 'src'),
 					test: /\.tsx?$/,
 					use: {
 						loader: 'ts-loader',
 						options: {
-							configFile: 'tsconfig.webviews.json',
-							transpileOnly: true
-						}
-					}
+							configFile: path.join(basePath, 'tsconfig.json'),
+							experimentalWatchApi: true,
+							transpileOnly: true,
+						},
+					},
 				},
 				{
 					test: /\.scss$/,
 					use: [
 						{
-							loader: MiniCssExtractPlugin.loader
+							loader: MiniCssExtractPlugin.loader,
 						},
 						{
 							loader: 'css-loader',
 							options: {
 								sourceMap: true,
-								url: false
-							}
+								url: false,
+							},
 						},
 						{
 							loader: 'sass-loader',
 							options: {
-								sourceMap: true
-							}
-						}
+								sourceMap: true,
+							},
+						},
 					],
-					exclude: /node_modules/
-				}
-			]
+					exclude: /node_modules/,
+				},
+			],
 		},
 		resolve: {
 			extensions: ['.ts', '.tsx', '.js', '.jsx', '.json'],
-			modules: [path.resolve(__dirname, 'src/webviews/apps'), 'node_modules']
+			modules: [basePath, 'node_modules'],
+			symlinks: false,
 		},
 		plugins: plugins,
 		stats: {
-			all: false,
+			preset: 'errors-warnings',
 			assets: true,
-			builtAt: true,
+			colors: true,
 			env: true,
-			errors: true,
+			errorsCount: true,
+			warningsCount: true,
 			timings: true,
-			warnings: true
-		}
+		},
 	};
 }

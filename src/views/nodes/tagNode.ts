@@ -1,25 +1,27 @@
 'use strict';
-import { TreeItem, TreeItemCollapsibleState } from 'vscode';
-import { ViewBranchesLayout } from '../../configuration';
-import { Container } from '../../container';
-import { GitLog, GitService, GitTag, GitUri, TagDateFormatting } from '../../git/gitService';
-import { debug, gate, Iterables, Strings } from '../../system';
-import { RepositoriesView } from '../repositoriesView';
+import { TreeItem, TreeItemCollapsibleState, window } from 'vscode';
 import { CommitNode } from './commitNode';
-import { MessageNode, ShowMoreNode } from './common';
-import { insertDateMarkers } from './helpers';
-import { PageableViewNode, ResourceType, ViewNode, ViewRefNode } from './viewNode';
-import { emojify } from '../../emojis';
-import { RepositoryNode } from './repositoryNode';
+import { LoadMoreNode, MessageNode } from './common';
+import { ViewBranchesLayout } from '../../configuration';
 import { GlyphChars } from '../../constants';
+import { Container } from '../../container';
+import { emojify } from '../../emojis';
+import { GitLog, GitRevision, GitTag, GitTagReference, TagDateFormatting } from '../../git/git';
+import { GitUri } from '../../git/gitUri';
+import { RepositoriesView } from '../repositoriesView';
+import { insertDateMarkers } from './helpers';
+import { RepositoryNode } from './repositoryNode';
+import { debug, gate, Iterables, Strings } from '../../system';
+import { TagsView } from '../tagsView';
+import { ContextValues, PageableViewNode, ViewNode, ViewRefNode } from './viewNode';
 
-export class TagNode extends ViewRefNode<RepositoriesView> implements PageableViewNode {
+export class TagNode extends ViewRefNode<TagsView | RepositoriesView, GitTagReference> implements PageableViewNode {
 	static key = ':tag';
 	static getId(repoPath: string, name: string): string {
 		return `${RepositoryNode.getId(repoPath)}${this.key}(${name})`;
 	}
 
-	constructor(uri: GitUri, view: RepositoriesView, parent: ViewNode, public readonly tag: GitTag) {
+	constructor(uri: GitUri, view: TagsView | RepositoriesView, parent: ViewNode, public readonly tag: GitTag) {
 		super(uri, view, parent);
 	}
 
@@ -35,27 +37,31 @@ export class TagNode extends ViewRefNode<RepositoriesView> implements PageableVi
 		return this.view.config.branches.layout === ViewBranchesLayout.Tree ? this.tag.getBasename() : this.tag.name;
 	}
 
-	get ref(): string {
-		return this.tag.name;
+	get ref(): GitTagReference {
+		return this.tag;
 	}
 
 	async getChildren(): Promise<ViewNode[]> {
 		const log = await this.getLog();
-		if (log === undefined) return [new MessageNode(this.view, this, 'No commits could be found.')];
+		if (log == null) return [new MessageNode(this.view, this, 'No commits could be found.')];
 
 		const getBranchAndTagTips = await Container.git.getBranchesAndTagsTipsFn(this.uri.repoPath, this.tag.name);
 		const children = [
 			...insertDateMarkers(
 				Iterables.map(
 					log.commits.values(),
-					c => new CommitNode(this.view, this, c, undefined, getBranchAndTagTips)
+					c => new CommitNode(this.view, this, c, undefined, undefined, getBranchAndTagTips),
 				),
-				this
-			)
+				this,
+			),
 		];
 
 		if (log.hasMore) {
-			children.push(new ShowMoreNode(this.view, this, 'Commits', children[children.length - 1]));
+			children.push(
+				new LoadMoreNode(this.view, this, children[children.length - 1], undefined, () =>
+					Container.git.getCommitCount(this.tag.repoPath, this.tag.name),
+				),
+			);
 		}
 		return children;
 	}
@@ -63,16 +69,12 @@ export class TagNode extends ViewRefNode<RepositoriesView> implements PageableVi
 	getTreeItem(): TreeItem {
 		const item = new TreeItem(this.label, TreeItemCollapsibleState.Collapsed);
 		item.id = this.id;
-		item.contextValue = ResourceType.Tag;
-		item.description = `${GitService.shortenSha(this.tag.sha, { force: true })}${Strings.pad(
-			GlyphChars.Dot,
-			2,
-			2
-		)}${emojify(this.tag.message)}`;
-		item.tooltip = `${this.tag.name}${Strings.pad(GlyphChars.Dash, 2, 2)}${GitService.shortenSha(this.tag.sha, {
-			force: true
+		item.contextValue = ContextValues.Tag;
+		item.description = emojify(this.tag.message);
+		item.tooltip = `${this.tag.name}${Strings.pad(GlyphChars.Dash, 2, 2)}${GitRevision.shorten(this.tag.sha, {
+			force: true,
 		})}\n${this.tag.formatDateFromNow()} (${this.tag.formatDate(TagDateFormatting.dateFormat)})\n\n${emojify(
-			this.tag.message
+			this.tag.message,
 		)}${
 			this.tag.commitDate != null && this.tag.date !== this.tag.commitDate
 				? `\n${this.tag.formatCommitDateFromNow()} (${this.tag.formatCommitDate(TagDateFormatting.dateFormat)})`
@@ -92,10 +94,10 @@ export class TagNode extends ViewRefNode<RepositoriesView> implements PageableVi
 
 	private _log: GitLog | undefined;
 	private async getLog() {
-		if (this._log === undefined) {
+		if (this._log == null) {
 			this._log = await Container.git.getLog(this.uri.repoPath!, {
 				limit: this.limit ?? this.view.config.defaultItemLimit,
-				ref: this.tag.name
+				ref: this.tag.name,
 			});
 		}
 
@@ -107,15 +109,22 @@ export class TagNode extends ViewRefNode<RepositoriesView> implements PageableVi
 	}
 
 	limit: number | undefined = this.view.getNodeLastKnownLimit(this);
-	async showMore(limit?: number | { until?: any }) {
-		let log = await this.getLog();
-		if (log === undefined || !log.hasMore) return;
+	@gate()
+	async loadMore(limit?: number | { until?: any }) {
+		let log = await window.withProgress(
+			{
+				location: { viewId: this.view.id },
+			},
+			() => this.getLog(),
+		);
+		if (log == null || !log.hasMore) return;
 
 		log = await log.more?.(limit ?? this.view.config.pageItemLimit);
 		if (this._log === log) return;
 
 		this._log = log;
 		this.limit = log?.count;
-		this.triggerChange(false);
+
+		void this.triggerChange(false);
 	}
 }

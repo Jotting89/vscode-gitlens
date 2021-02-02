@@ -1,5 +1,5 @@
 'use strict';
-import { fileStatusRegex, GitCommitType, GitFile, GitFileStatus, GitStash, GitStashCommit } from '../git';
+import { fileStatusRegex, GitCommitType, GitFile, GitFileIndexStatus, GitStash, GitStashCommit } from '../git';
 import { Arrays, debug, Strings } from '../../system';
 // import { Logger } from './logger';
 
@@ -32,7 +32,7 @@ export class GitStashParser {
 		`${lb}s${rb}`,
 		'%B', // summary
 		`${lb}${sl}s${rb}`,
-		`${lb}f${rb}`
+		`${lb}f${rb}`,
 	].join('%n');
 
 	@debug({ args: false, singleLine: true })
@@ -48,7 +48,7 @@ export class GitStashParser {
 			repoPath = Strings.normalizePath(repoPath);
 		}
 
-		const commits: Map<string, GitStashCommit> = new Map();
+		const commits = new Map<string, GitStashCommit>();
 
 		let entry: StashEntry = emptyEntry;
 		let line: string | undefined = undefined;
@@ -70,7 +70,7 @@ export class GitStashParser {
 			switch (token) {
 				case 114: // 'r': // ref
 					entry = {
-						ref: line.substring(4)
+						ref: line.substring(4),
 					};
 					break;
 
@@ -129,14 +129,14 @@ export class GitStashParser {
 								renamedFileName = match[3];
 								if (renamedFileName !== undefined) {
 									entry.files.push({
-										status: match[1] as GitFileStatus,
+										status: match[1] as GitFileIndexStatus,
 										fileName: renamedFileName,
-										originalFileName: match[2]
+										originalFileName: match[2],
 									});
 								} else {
 									entry.files.push({
-										status: match[1] as GitFileStatus,
-										fileName: match[2]
+										status: match[1] as GitFileIndexStatus,
+										fileName: match[2],
 									});
 								}
 							}
@@ -144,7 +144,7 @@ export class GitStashParser {
 
 						if (entry.files !== undefined) {
 							entry.fileNames = Arrays.filterMap(entry.files, f =>
-								f.fileName ? f.fileName : undefined
+								f.fileName ? f.fileName : undefined,
 							).join(', ');
 						}
 					}
@@ -155,7 +155,7 @@ export class GitStashParser {
 
 		const stash: GitStash = {
 			repoPath: repoPath,
-			commits: commits
+			commits: commits,
 		};
 		return stash;
 	}
@@ -172,7 +172,7 @@ export class GitStashParser {
 				new Date((entry.committedDate! as any) * 1000),
 				entry.summary === undefined ? emptyStr : entry.summary,
 				entry.fileNames!,
-				entry.files || []
+				entry.files ?? [],
 			);
 		}
 

@@ -1,17 +1,31 @@
 'use strict';
 import { Command, Disposable, Event, TreeItem, TreeItemCollapsibleState, TreeViewVisibilityChangeEvent } from 'vscode';
-import { GitUri } from '../../git/gitService';
+import { GlyphChars } from '../../constants';
+import { Container } from '../../container';
+import {
+	GitFile,
+	GitReference,
+	GitRevisionReference,
+	Repository,
+	RepositoryChange,
+	RepositoryChangeComparisonMode,
+	RepositoryChangeEvent,
+} from '../../git/git';
+import { GitUri } from '../../git/gitUri';
 import { Logger } from '../../logger';
-import { debug, Functions, gate, logName } from '../../system';
-import { TreeViewNodeStateChangeEvent, View } from '../viewBase';
+import { debug, Functions, gate, log, logName, Strings } from '../../system';
+import { TreeViewNodeCollapsibleStateChangeEvent, View } from '../viewBase';
 
-export enum ResourceType {
+export enum ContextValues {
 	ActiveFileHistory = 'gitlens:history:active:file',
 	ActiveLineHistory = 'gitlens:history:active:line',
 	Branch = 'gitlens:branch',
 	Branches = 'gitlens:branches',
 	BranchStatusAheadOfUpstream = 'gitlens:status-branch:upstream:ahead',
 	BranchStatusBehindUpstream = 'gitlens:status-branch:upstream:behind',
+	BranchStatusNoUpstream = 'gitlens:status-branch:upstream:none',
+	BranchStatusSameAsUpstream = 'gitlens:status-branch:upstream:same',
+	BranchStatusFiles = 'gitlens:status-branch:files',
 	Commit = 'gitlens:commit',
 	Commits = 'gitlens:commits',
 	Compare = 'gitlens:compare',
@@ -19,34 +33,43 @@ export enum ResourceType {
 	ComparePicker = 'gitlens:compare:picker',
 	ComparePickerWithRef = 'gitlens:compare:picker:ref',
 	CompareResults = 'gitlens:compare:results',
+	CompareResultsCommits = 'gitlens:compare:results:commits',
 	Contributor = 'gitlens:contributor',
 	Contributors = 'gitlens:contributors',
+	DateMarker = 'gitlens:date-marker',
 	File = 'gitlens:file',
 	FileHistory = 'gitlens:history:file',
 	Folder = 'gitlens:folder',
 	LineHistory = 'gitlens:history:line',
+	Merge = 'gitlens:merge',
+	MergeConflictCurrentChanges = 'gitlens:merge-conflict:current',
+	MergeConflictIncomingChanges = 'gitlens:merge-conflict:incoming',
 	Message = 'gitlens:message',
 	Pager = 'gitlens:pager',
+	PullRequest = 'gitlens:pullrequest',
+	Rebase = 'gitlens:rebase',
 	Reflog = 'gitlens:reflog',
 	ReflogRecord = 'gitlens:reflog-record',
 	Remote = 'gitlens:remote',
 	Remotes = 'gitlens:remotes',
 	Repositories = 'gitlens:repositories',
 	Repository = 'gitlens:repository',
-	ResultsCommits = 'gitlens:results:commits',
+	RepositoryFolder = 'gitlens:repo-folder',
 	ResultsFile = 'gitlens:file:results',
 	ResultsFiles = 'gitlens:results:files',
-	Search = 'gitlens:search',
+	SearchAndCompare = 'gitlens:searchAndCompare',
 	SearchResults = 'gitlens:search:results',
+	SearchResultsCommits = 'gitlens:search:results:commits',
 	Stash = 'gitlens:stash',
-	StashFile = 'gitlens:file:stash',
 	Stashes = 'gitlens:stashes',
 	StatusFileCommits = 'gitlens:status:file:commits',
 	StatusFiles = 'gitlens:status:files',
 	StatusAheadOfUpstream = 'gitlens:status:upstream:ahead',
 	StatusBehindUpstream = 'gitlens:status:upstream:behind',
+	StatusNoUpstream = 'gitlens:status:upstream:none',
+	StatusSameAsUpstream = 'gitlens:status:upstream:same',
 	Tag = 'gitlens:tag',
-	Tags = 'gitlens:tags'
+	Tags = 'gitlens:tags',
 }
 
 export const unknownGitUri = new GitUri();
@@ -57,13 +80,19 @@ export interface ViewNode {
 
 @logName<ViewNode>((c, name) => `${name}${c.id != null ? `(${c.id})` : ''}`)
 export abstract class ViewNode<TView extends View = View> {
+	static is(node: any): node is ViewNode {
+		return node instanceof ViewNode;
+	}
+
+	protected splatted = false;
+
 	constructor(uri: GitUri, public readonly view: TView, protected readonly parent?: ViewNode) {
 		this._uri = uri;
 	}
 
 	toClipboard?(): string;
 
-	toString() {
+	toString(): string {
 		return `${Logger.toLoggableName(this)}${this.id != null ? `(${this.id})` : ''}`;
 	}
 
@@ -75,7 +104,8 @@ export abstract class ViewNode<TView extends View = View> {
 	abstract getChildren(): ViewNode[] | Promise<ViewNode[]>;
 
 	getParent(): ViewNode | undefined {
-		return this.parent;
+		// If this node's parent has been splatted (e.g. not shown itself, but its children are), then return its grandparent
+		return this.parent?.splatted ? this.parent?.getParent() : this.parent;
 	}
 
 	abstract getTreeItem(): TreeItem | Promise<TreeItem>;
@@ -84,78 +114,114 @@ export abstract class ViewNode<TView extends View = View> {
 		return undefined;
 	}
 
-	refresh?(reset?: boolean): void | boolean | Promise<void> | Promise<boolean>;
+	refresh?(reset?: boolean): boolean | void | Promise<void> | Promise<boolean>;
 
-	@gate()
+	@gate<RepositoryFolderNode['triggerChange']>(
+		(reset: boolean = false, force: boolean = false, avoidSelf?: ViewNode) =>
+			JSON.stringify([reset, force, avoidSelf?.toString()]),
+	)
 	@debug()
-	triggerChange(reset: boolean = false): Promise<void> {
-		return this.view.refreshNode(this, reset);
+	triggerChange(reset: boolean = false, force: boolean = false, avoidSelf?: ViewNode): Promise<void> {
+		// If this node has been splatted (e.g. not shown itself, but its children are), then delegate the change to its parent
+		if (this.splatted && this.parent != null && this.parent !== avoidSelf) {
+			return this.parent.triggerChange(reset, force);
+		}
+
+		return this.view.refreshNode(this, reset, force);
 	}
+
+	getSplattedChild?(): Promise<ViewNode | undefined>;
 }
 
-export abstract class ViewRefNode<TView extends View = View> extends ViewNode<TView> {
-	abstract get ref(): string;
+export abstract class ViewRefNode<
+	TView extends View = View,
+	TReference extends GitReference = GitReference
+> extends ViewNode<TView> {
+	abstract get ref(): TReference;
 
 	get repoPath(): string {
 		return this.uri.repoPath!;
 	}
 
-	toString() {
-		return `${super.toString()}:${this.ref}`;
+	toString(): string {
+		return `${super.toString()}:${GitReference.toString(this.ref, false)}`;
 	}
 }
 
-export abstract class ViewRefFileNode<TView extends View = View> extends ViewRefNode<TView> {
+export abstract class ViewRefFileNode<TView extends View = View> extends ViewRefNode<TView, GitRevisionReference> {
+	abstract get file(): GitFile;
 	abstract get fileName(): string;
 
-	toString() {
+	toString(): string {
 		return `${super.toString()}:${this.fileName}`;
 	}
 }
 
-export function nodeSupportsConditionalDismissal(node: ViewNode): node is ViewNode & { canDismiss(): boolean } {
-	return typeof (node as ViewNode & { canDismiss(): boolean }).canDismiss === 'function';
+export function nodeSupportsClearing(node: ViewNode): node is ViewNode & { clear(): void | Promise<void> } {
+	return typeof (node as ViewNode & { clear(): void | Promise<void> }).clear === 'function';
 }
 
 export interface PageableViewNode {
 	readonly id: string;
 	limit?: number;
 	readonly hasMore: boolean;
-	showMore(limit?: number | { until?: any }): Promise<void>;
+	loadMore(limit?: number | { until?: any }): Promise<void>;
 }
 
 export namespace PageableViewNode {
 	export function is(node: ViewNode): node is ViewNode & PageableViewNode {
-		return Functions.is<ViewNode & PageableViewNode>(node, 'showMore');
+		return Functions.is<ViewNode & PageableViewNode>(node, 'loadMore');
 	}
 }
 
 export abstract class SubscribeableViewNode<TView extends View = View> extends ViewNode<TView> {
-	protected _disposable: Disposable;
-	protected _subscription: Promise<Disposable | undefined> | undefined;
+	protected disposable: Disposable;
+	protected subscription: Promise<Disposable | undefined> | undefined;
+
+	protected loaded: boolean = false;
 
 	constructor(uri: GitUri, view: TView, parent?: ViewNode) {
 		super(uri, view, parent);
 
 		const disposables = [
 			this.view.onDidChangeVisibility(this.onVisibilityChanged, this),
-			this.view.onDidChangeNodeState(this.onNodeStateChanged, this)
+			this.view.onDidChangeNodeCollapsibleState(this.onNodeCollapsibleStateChanged, this),
 		];
 
 		if (viewSupportsAutoRefresh(this.view)) {
 			disposables.push(this.view.onDidChangeAutoRefresh(this.onAutoRefreshChanged, this));
 		}
 
-		this._disposable = Disposable.from(...disposables);
+		const getTreeItem = this.getTreeItem;
+		this.getTreeItem = function (this: SubscribeableViewNode<TView>) {
+			this.loaded = true;
+			void this.ensureSubscription();
+			return getTreeItem.apply(this);
+		};
+
+		const getChildren = this.getChildren;
+		this.getChildren = function (this: SubscribeableViewNode<TView>) {
+			this.loaded = true;
+			void this.ensureSubscription();
+			return getChildren.apply(this);
+		};
+
+		this.disposable = Disposable.from(...disposables);
 	}
 
 	@debug()
 	dispose() {
 		void this.unsubscribe();
 
-		if (this._disposable !== undefined) {
-			this._disposable.dispose();
-		}
+		this.disposable?.dispose();
+	}
+
+	@gate()
+	@debug()
+	async triggerChange(reset: boolean = false, force: boolean = false): Promise<void> {
+		if (!this.loaded) return;
+
+		await super.triggerChange(reset, force);
 	}
 
 	private _canSubscribe: boolean = true;
@@ -173,18 +239,19 @@ export abstract class SubscribeableViewNode<TView extends View = View> extends V
 		}
 	}
 
+	protected get requiresResetOnVisible(): boolean {
+		return false;
+	}
+
 	protected abstract subscribe(): Disposable | undefined | Promise<Disposable | undefined>;
 
 	@debug()
 	protected async unsubscribe(): Promise<void> {
-		if (this._subscription !== undefined) {
-			const subscriptionPromise = this._subscription;
-			this._subscription = undefined;
+		if (this.subscription != null) {
+			const subscriptionPromise = this.subscription;
+			this.subscription = undefined;
 
-			const subscription = await subscriptionPromise;
-			if (subscription !== undefined) {
-				subscription.dispose();
-			}
+			(await subscriptionPromise)?.dispose();
 		}
 	}
 
@@ -193,19 +260,19 @@ export abstract class SubscribeableViewNode<TView extends View = View> extends V
 		this.onVisibilityChanged({ visible: this.view.visible });
 	}
 
-	protected onParentStateChanged?(state: TreeItemCollapsibleState): void;
-	protected onStateChanged?(state: TreeItemCollapsibleState): void;
+	protected onParentCollapsibleStateChanged?(state: TreeItemCollapsibleState): void;
+	protected onCollapsibleStateChanged?(state: TreeItemCollapsibleState): void;
 
-	protected _state: TreeItemCollapsibleState | undefined;
-	protected onNodeStateChanged(e: TreeViewNodeStateChangeEvent<ViewNode>) {
+	protected collapsibleState: TreeItemCollapsibleState | undefined;
+	protected onNodeCollapsibleStateChanged(e: TreeViewNodeCollapsibleStateChangeEvent<ViewNode>) {
 		if (e.element === this) {
-			this._state = e.state;
-			if (this.onStateChanged !== undefined) {
-				this.onStateChanged(e.state);
+			this.collapsibleState = e.state;
+			if (this.onCollapsibleStateChanged !== undefined) {
+				this.onCollapsibleStateChanged(e.state);
 			}
 		} else if (e.element === this.parent) {
-			if (this.onParentStateChanged !== undefined) {
-				this.onParentStateChanged(e.state);
+			if (this.onParentCollapsibleStateChanged !== undefined) {
+				this.onParentCollapsibleStateChanged(e.state);
 			}
 		}
 	}
@@ -215,10 +282,11 @@ export abstract class SubscribeableViewNode<TView extends View = View> extends V
 		void this.ensureSubscription();
 
 		if (e.visible) {
-			void this.triggerChange();
+			void this.triggerChange(this.requiresResetOnVisible);
 		}
 	}
 
+	@gate()
 	@debug()
 	async ensureSubscription() {
 		// We only need to subscribe if we are visible and if auto-refresh enabled (when supported)
@@ -233,10 +301,136 @@ export abstract class SubscribeableViewNode<TView extends View = View> extends V
 		}
 
 		// If we already have a subscription, just kick out
-		if (this._subscription !== undefined) return;
+		if (this.subscription != null) return;
 
-		this._subscription = Promise.resolve(this.subscribe());
-		await this._subscription;
+		this.subscription = Promise.resolve(this.subscribe());
+		await this.subscription;
+	}
+
+	@gate()
+	@debug()
+	async resetSubscription() {
+		await this.unsubscribe();
+		await this.ensureSubscription();
+	}
+}
+
+export abstract class RepositoryFolderNode<
+	TView extends View = View,
+	TChild extends ViewNode = ViewNode
+> extends SubscribeableViewNode<TView> {
+	static key = ':repository';
+	static getId(repoPath: string): string {
+		return `gitlens${this.key}(${repoPath})`;
+	}
+
+	protected splatted = true;
+	protected child: TChild | undefined;
+
+	constructor(uri: GitUri, view: TView, parent: ViewNode, public readonly repo: Repository, splatted: boolean) {
+		super(uri, view, parent);
+
+		this.splatted = splatted;
+	}
+
+	toClipboard(): string {
+		return this.repo.path;
+	}
+
+	get id(): string {
+		return RepositoryFolderNode.getId(this.repo.path);
+	}
+
+	async getTreeItem(): Promise<TreeItem> {
+		this.splatted = false;
+
+		let expand = this.repo.starred;
+		if (!expand) {
+			expand = await Container.git.isActiveRepoPath(this.uri.repoPath);
+		}
+
+		const item = new TreeItem(
+			this.repo.formattedName ?? this.uri.repoPath ?? '',
+			expand ? TreeItemCollapsibleState.Expanded : TreeItemCollapsibleState.Collapsed,
+		);
+		item.contextValue = `${ContextValues.RepositoryFolder}${this.repo.starred ? '+starred' : ''}`;
+		item.description = this.repo.supportsChangeEvents ? undefined : Strings.pad(GlyphChars.Warning, 1, 0);
+		item.tooltip = `${
+			this.repo.formattedName ? `${this.repo.formattedName}\n${this.uri.repoPath}` : this.uri.repoPath ?? ''
+		}${
+			this.repo.supportsChangeEvents
+				? ''
+				: `\n\n${GlyphChars.Warning} Unable to automatically detect repository changes`
+		}`;
+
+		return item;
+	}
+
+	async getSplattedChild() {
+		if (this.child == null) {
+			await this.getChildren();
+		}
+
+		return this.child;
+	}
+
+	@gate()
+	@debug()
+	async refresh(reset: boolean = false) {
+		await this.child?.triggerChange(reset, false, this);
+
+		await this.ensureSubscription();
+	}
+
+	@log()
+	async star() {
+		await this.repo.star();
+		// void this.parent!.triggerChange();
+	}
+
+	@log()
+	async unstar() {
+		await this.repo.unstar();
+		// void this.parent!.triggerChange();
+	}
+
+	@debug()
+	protected subscribe(): Disposable | Promise<Disposable> {
+		return this.repo.onDidChange(this.onRepositoryChanged, this);
+	}
+
+	protected get requiresResetOnVisible(): boolean {
+		return this._repoUpdatedAt !== this.repo.updatedAt;
+	}
+
+	private _repoUpdatedAt: number = this.repo.updatedAt;
+
+	protected abstract changed(e: RepositoryChangeEvent): boolean;
+
+	@debug({
+		args: {
+			0: (e: RepositoryChangeEvent) => e.toString(),
+		},
+	})
+	private onRepositoryChanged(e: RepositoryChangeEvent) {
+		this._repoUpdatedAt = this.repo.updatedAt;
+
+		if (e.changed(RepositoryChange.Closed, RepositoryChangeComparisonMode.Any)) {
+			this.dispose();
+			void this.parent?.triggerChange(true);
+
+			return;
+		}
+
+		if (e.changed(RepositoryChange.Starred, RepositoryChangeComparisonMode.Any)) {
+			void this.parent?.triggerChange(true);
+
+			return;
+		}
+
+		if (this.changed(e)) {
+			void (this.loaded ? this : this.parent ?? this).triggerChange(true);
+		}
 	}
 }
 

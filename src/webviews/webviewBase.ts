@@ -1,6 +1,5 @@
 'use strict';
-import * as paths from 'path';
-import * as fs from 'fs';
+import { TextDecoder } from 'util';
 import {
 	commands,
 	ConfigurationChangeEvent,
@@ -8,43 +7,57 @@ import {
 	Disposable,
 	Uri,
 	ViewColumn,
+	Webview,
 	WebviewPanel,
 	WebviewPanelOnDidChangeViewStateEvent,
 	window,
-	workspace
+	workspace,
 } from 'vscode';
+import { Commands } from '../commands';
 import { configuration } from '../configuration';
 import { Container } from '../container';
+import { CommitFormatter, GitBlameCommit, PullRequest, PullRequestState } from '../git/git';
 import { Logger } from '../logger';
 import {
 	DidChangeConfigurationNotificationType,
+	DidPreviewConfigurationNotificationType,
 	IpcMessage,
 	IpcNotificationParamsOf,
 	IpcNotificationType,
 	onIpcCommand,
-	UpdateConfigurationCommandType
+	PreviewConfigurationCommandType,
+	UpdateConfigurationCommandType,
 } from './protocol';
-import { Commands } from '../commands';
 
 let ipcSequence = 0;
+function nextIpcId() {
+	if (ipcSequence === Number.MAX_SAFE_INTEGER) {
+		ipcSequence = 1;
+	} else {
+		ipcSequence++;
+	}
+
+	return `host:${ipcSequence}`;
+}
 
 const emptyCommands: Disposable[] = [
 	{
-		dispose: function() {
+		dispose: function () {
 			/* noop */
-		}
-	}
+		},
+	},
 ];
 
 export abstract class WebviewBase implements Disposable {
-	protected _disposable: Disposable;
+	protected disposable: Disposable;
 	private _disposablePanel: Disposable | undefined;
 	private _panel: WebviewPanel | undefined;
 
 	constructor(showCommand: Commands, private readonly _column?: ViewColumn) {
-		this._disposable = Disposable.from(
+		this.disposable = Disposable.from(
 			configuration.onDidChange(this.onConfigurationChanged, this),
-			commands.registerCommand(showCommand, this.onShowCommand, this)
+			configuration.onDidChangeAny(this.onAnyConfigurationChanged, this),
+			commands.registerCommand(showCommand, this.onShowCommand, this),
 		);
 	}
 
@@ -61,32 +74,79 @@ export abstract class WebviewBase implements Disposable {
 	renderEndOfBody?(): string | Promise<string>;
 
 	dispose() {
-		this._disposable && this._disposable.dispose();
-		this._disposablePanel && this._disposablePanel.dispose();
+		this.disposable.dispose();
+		this._disposablePanel?.dispose();
+	}
+
+	private _customSettings:
+		| Map<
+				string,
+				{
+					name: string;
+					enabled: () => boolean;
+					update: (enabled: boolean) => Promise<void>;
+				}
+		  >
+		| undefined;
+	private get customSettings() {
+		if (this._customSettings == null) {
+			this._customSettings = new Map<
+				string,
+				{
+					name: string;
+					enabled: () => boolean;
+					update: (enabled: boolean) => Promise<void>;
+				}
+			>([
+				[
+					'rebaseEditor.enabled',
+					{
+						name: 'workbench.editorAssociations',
+						enabled: () => Container.rebaseEditor.enabled,
+						update: Container.rebaseEditor.setEnabled,
+					},
+				],
+			]);
+		}
+		return this._customSettings;
 	}
 
 	protected onShowCommand() {
-		this.show(this._column);
+		void this.show(this._column);
 	}
 
-	private onConfigurationChanged(e: ConfigurationChangeEvent) {
-		this.notifyDidChangeConfiguration();
+	private onAnyConfigurationChanged(e: ConfigurationChangeEvent) {
+		let notify = false;
+		for (const setting of this.customSettings.values()) {
+			if (e.affectsConfiguration(setting.name)) {
+				notify = true;
+				break;
+			}
+		}
+
+		if (!notify) return;
+
+		void this.notifyDidChangeConfiguration();
+	}
+
+	private onConfigurationChanged(_e: ConfigurationChangeEvent) {
+		void this.notifyDidChangeConfiguration();
 	}
 
 	private onPanelDisposed() {
-		this._disposablePanel && this._disposablePanel.dispose();
+		this._disposablePanel?.dispose();
 		this._panel = undefined;
 	}
 
 	private onViewStateChanged(e: WebviewPanelOnDidChangeViewStateEvent) {
 		Logger.log(
 			`Webview(${this.id}).onViewStateChanged`,
-			`active=${e.webviewPanel.active}, visible=${e.webviewPanel.visible}`
+			`active=${e.webviewPanel.active}, visible=${e.webviewPanel.visible}`,
 		);
 
 		// Anytime the webview becomes active, make sure it has the most up-to-date config
 		if (e.webviewPanel.active) {
-			this.notifyDidChangeConfiguration();
+			void this.notifyDidChangeConfiguration();
 		}
 	}
 
@@ -98,10 +158,18 @@ export abstract class WebviewBase implements Disposable {
 						params.scope === 'workspace' ? ConfigurationTarget.Workspace : ConfigurationTarget.Global;
 
 					for (const key in params.changes) {
+						let value = params.changes[key];
+
+						const customSetting = this.customSettings.get(key);
+						if (customSetting != null) {
+							await customSetting.update(value);
+
+							continue;
+						}
+
 						const inspect = configuration.inspect(key as any)!;
 
-						let value = params.changes[key];
-						if (value !== undefined) {
+						if (value != null) {
 							if (params.scope === 'workspace') {
 								if (value === inspect.workspaceValue) continue;
 							} else {
@@ -122,6 +190,75 @@ export abstract class WebviewBase implements Disposable {
 				});
 
 				break;
+
+			case PreviewConfigurationCommandType.method:
+				onIpcCommand(PreviewConfigurationCommandType, e, async params => {
+					switch (params.type) {
+						case 'commit': {
+							const commit = new GitBlameCommit(
+								'~/code/eamodio/vscode-gitlens-demo',
+								'fe26af408293cba5b4bfd77306e1ac9ff7ccaef8',
+								'You',
+								'eamodio@gmail.com',
+								new Date('2016-11-12T20:41:00.000Z'),
+								new Date('2020-11-01T06:57:21.000Z'),
+								'Supercharged',
+								'code.ts',
+								undefined,
+								'3ac1d3f51d7cf5f438cc69f25f6740536ad80fef',
+								'code.ts',
+								[],
+							);
+
+							let includePullRequest = false;
+							switch (params.key) {
+								case configuration.name('currentLine', 'format'):
+									includePullRequest = Container.config.currentLine.pullRequests.enabled;
+									break;
+								case configuration.name('statusBar', 'format'):
+									includePullRequest = Container.config.statusBar.pullRequests.enabled;
+									break;
+							}
+
+							let pr: PullRequest | undefined;
+							if (includePullRequest) {
+								pr = new PullRequest(
+									{ id: 'github', name: 'GitHub', domain: 'github.com' },
+									{
+										name: 'Eric Amodio',
+										avatarUrl: 'https://avatars1.githubusercontent.com/u/641685?s=32&v=4',
+										url: 'https://github.com/eamodio',
+									},
+									'1',
+									'Supercharged',
+									'https://github.com/eamodio/vscode-gitlens/pulls/1',
+									PullRequestState.Merged,
+									new Date('Sat, 12 Nov 2016 19:41:00 GMT'),
+									undefined,
+									new Date('Sat, 12 Nov 2016 20:41:00 GMT'),
+								);
+							}
+
+							let preview;
+							try {
+								preview = CommitFormatter.fromTemplate(params.format, commit, {
+									dateFormat: Container.config.defaultDateFormat,
+									pullRequestOrRemote: pr,
+									messageTruncateAtNewLine: true,
+								});
+							} catch {
+								preview = 'Invalid format';
+							}
+
+							await this.notify(DidPreviewConfigurationNotificationType, {
+								id: params.id,
+								preview: preview,
+							});
+						}
+					}
+				});
+				break;
+
 			default:
 				break;
 		}
@@ -136,25 +273,21 @@ export abstract class WebviewBase implements Disposable {
 	}
 
 	get visible() {
-		return this._panel === undefined ? false : this._panel.visible;
+		return this._panel?.visible ?? false;
 	}
 
 	hide() {
-		if (this._panel === undefined) return;
-
-		this._panel.dispose();
+		this._panel?.dispose();
 	}
 
 	setTitle(title: string) {
-		if (this._panel === undefined) return;
+		if (this._panel == null) return;
 
 		this._panel.title = title;
 	}
 
-	async show(column: ViewColumn = ViewColumn.Active): Promise<void> {
-		const html = await this.getHtml();
-
-		if (this._panel === undefined) {
+	async show(column: ViewColumn = ViewColumn.Beside): Promise<void> {
+		if (this._panel == null) {
 			this._panel = window.createWebviewPanel(
 				this.id,
 				this.title,
@@ -163,8 +296,8 @@ export abstract class WebviewBase implements Disposable {
 					retainContextWhenHidden: true,
 					enableFindWidget: true,
 					enableCommandUris: true,
-					enableScripts: true
-				}
+					enableScripts: true,
+				},
 			);
 
 			this._panel.iconPath = Uri.file(Container.context.asAbsolutePath('images/gitlens-icon.png'));
@@ -173,85 +306,66 @@ export abstract class WebviewBase implements Disposable {
 				this._panel.onDidDispose(this.onPanelDisposed, this),
 				this._panel.onDidChangeViewState(this.onViewStateChanged, this),
 				this._panel.webview.onDidReceiveMessage(this.onMessageReceivedCore, this),
-				...this.registerCommands()
+				...this.registerCommands(),
 			);
 
-			this._panel.webview.html = html;
+			this._panel.webview.html = await this.getHtml(this._panel.webview);
 		} else {
+			const html = await this.getHtml(this._panel.webview);
+
 			// Reset the html to get the webview to reload
 			this._panel.webview.html = '';
 			this._panel.webview.html = html;
-			this._panel.reveal(this._panel.viewColumn || ViewColumn.Active, false);
+
+			this._panel.reveal(this._panel.viewColumn ?? ViewColumn.Active, false);
 		}
 	}
 
-	private _html: string | undefined;
-	private async getHtml(): Promise<string> {
-		const filename = Container.context.asAbsolutePath(paths.join('dist/webviews/', this.filename));
+	private async getHtml(webview: Webview): Promise<string> {
+		const uri = Uri.joinPath(Container.context.extensionUri, 'dist', 'webviews', this.filename);
+		const content = new TextDecoder('utf8').decode(await workspace.fs.readFile(uri));
 
-		let content;
-		// When we are debugging avoid any caching so that we can change the html and have it update without reloading
-		if (Logger.isDebugging) {
-			content = await new Promise<string>((resolve, reject) => {
-				fs.readFile(filename, 'utf8', (err, data) => {
-					if (err) {
-						reject(err);
-					} else {
-						resolve(data);
-					}
-				});
-			});
-		} else {
-			if (this._html !== undefined) return this._html;
+		let html = content
+			.replace(/#{cspSource}/g, webview.cspSource)
+			.replace(/#{root}/g, webview.asWebviewUri(Container.context.extensionUri).toString());
 
-			const doc = await workspace.openTextDocument(filename);
-			content = doc.getText();
-		}
-
-		let html = content.replace(
-			/#{root}/g,
-			Uri.file(Container.context.asAbsolutePath('.'))
-				.with({ scheme: 'vscode-resource' })
-				.toString()
-		);
-
-		if (this.renderHead) {
+		if (this.renderHead != null) {
 			html = html.replace(/#{head}/i, await this.renderHead());
 		}
 
-		if (this.renderBody) {
+		if (this.renderBody != null) {
 			html = html.replace(/#{body}/i, await this.renderBody());
 		}
 
-		if (this.renderEndOfBody) {
+		if (this.renderEndOfBody != null) {
 			html = html.replace(/#{endOfBody}/i, await this.renderEndOfBody());
 		}
 
-		this._html = html;
 		return html;
 	}
 
 	protected notify<NT extends IpcNotificationType>(type: NT, params: IpcNotificationParamsOf<NT>): Thenable<boolean> {
-		return this.postMessage({ id: this.nextIpcId(), method: type.method, params: params });
+		return this.postMessage({ id: nextIpcId(), method: type.method, params: params });
 	}
 
-	private nextIpcId() {
-		if (ipcSequence === Number.MAX_SAFE_INTEGER) {
-			ipcSequence = 1;
-		} else {
-			ipcSequence++;
+	protected getCustomSettings(): Record<string, boolean> {
+		const customSettings = Object.create(null);
+		for (const [key, setting] of this.customSettings) {
+			customSettings[key] = setting.enabled();
 		}
-
-		return `host:${ipcSequence}`;
+		return customSettings;
 	}
 
 	private notifyDidChangeConfiguration() {
 		// Make sure to get the raw config, not from the container which has the modes mixed in
-		return this.notify(DidChangeConfigurationNotificationType, { config: configuration.get() });
+		return this.notify(DidChangeConfigurationNotificationType, {
+			config: configuration.get(),
+			customSettings: this.getCustomSettings(),
+		});
 	}
 
 	private postMessage(message: IpcMessage) {
-		if (this._panel === undefined) return Promise.resolve(false);
+		if (this._panel == null) return Promise.resolve(false);
 
 		return this._panel.webview.postMessage(message);
 	}

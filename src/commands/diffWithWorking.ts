@@ -1,11 +1,16 @@
 'use strict';
-import { commands, TextDocumentShowOptions, TextEditor, Uri, window } from 'vscode';
+import { TextDocumentShowOptions, TextEditor, Uri, window } from 'vscode';
+import { ActiveEditorCommand, command, Commands, executeCommand, getCommandUri } from './common';
 import { Container } from '../container';
-import { GitService, GitUri } from '../git/gitService';
-import { ActiveEditorCommand, command, Commands, getCommandUri } from './common';
 import { DiffWithCommandArgs } from './diffWith';
+import { GitRevision } from '../git/git';
+import { GitUri } from '../git/gitUri';
+import { Logger } from '../logger';
+import { Messages } from '../messages';
 
 export interface DiffWithWorkingCommandArgs {
+	inDiffRightEditor?: boolean;
+	uri?: Uri;
 	line?: number;
 	showOptions?: TextDocumentShowOptions;
 }
@@ -13,69 +18,95 @@ export interface DiffWithWorkingCommandArgs {
 @command()
 export class DiffWithWorkingCommand extends ActiveEditorCommand {
 	constructor() {
-		super(Commands.DiffWithWorking);
+		super([Commands.DiffWithWorking, Commands.DiffWithWorkingInDiffLeft, Commands.DiffWithWorkingInDiffRight]);
 	}
 
 	async execute(editor?: TextEditor, uri?: Uri, args?: DiffWithWorkingCommandArgs): Promise<any> {
-		uri = getCommandUri(uri, editor);
-		if (uri == null) return undefined;
-
-		const gitUri = await GitUri.fromUri(uri);
-
 		args = { ...args };
-		if (args.line === undefined) {
-			args.line = editor == null ? 0 : editor.selection.active.line;
+		if (args.uri == null) {
+			uri = getCommandUri(uri, editor);
+			if (uri == null) return;
+		} else {
+			uri = args.uri;
 		}
 
-		// if (args.commit === undefined || args.commit.isUncommitted) {
+		let gitUri = await GitUri.fromUri(uri);
+
+		if (args.line == null) {
+			args.line = editor?.selection.active.line ?? 0;
+		}
+
+		if (args.inDiffRightEditor) {
+			try {
+				const diffUris = await Container.git.getPreviousDiffUris(gitUri.repoPath!, gitUri, gitUri.sha, 0);
+				gitUri = diffUris?.previous ?? gitUri;
+			} catch (ex) {
+				Logger.error(
+					ex,
+					'DiffWithWorkingCommand',
+					`getPreviousDiffUris(${gitUri.repoPath}, ${gitUri.fsPath}, ${gitUri.sha})`,
+				);
+				void Messages.showGenericErrorMessage('Unable to open compare');
+
+				return;
+			}
+		}
+
 		// If the sha is missing, just let the user know the file matches
-		if (gitUri.sha === undefined) return window.showInformationMessage('File matches the working tree');
-		if (gitUri.sha === GitService.deletedOrMissingSha) {
-			return window.showWarningMessage('Unable to open compare. File has been deleted from the working tree');
+		if (gitUri.sha == null) {
+			void window.showInformationMessage('File matches the working tree');
+
+			return;
+		}
+		if (gitUri.sha === GitRevision.deletedOrMissing) {
+			void window.showWarningMessage('Unable to open compare. File has been deleted from the working tree');
+
+			return;
 		}
 
 		// If we are a fake "staged" sha, check the status
 		if (gitUri.isUncommittedStaged) {
 			const status = await Container.git.getStatusForFile(gitUri.repoPath!, gitUri.fsPath);
-			if (status !== undefined && status.indexStatus !== undefined) {
-				const diffArgs: DiffWithCommandArgs = {
+			if (status?.indexStatus != null) {
+				void (await executeCommand<DiffWithCommandArgs>(Commands.DiffWith, {
 					repoPath: gitUri.repoPath,
 					lhs: {
-						sha: GitService.uncommittedStagedSha,
-						uri: gitUri.documentUri()
+						sha: GitRevision.uncommittedStaged,
+						uri: gitUri.documentUri(),
 					},
 					rhs: {
 						sha: '',
-						uri: gitUri.documentUri()
+						uri: gitUri.documentUri(),
 					},
 					line: args.line,
-					showOptions: args.showOptions
-				};
+					showOptions: args.showOptions,
+				}));
 
-				return commands.executeCommand(Commands.DiffWith, diffArgs);
+				return;
 			}
 		}
 
 		uri = gitUri.toFileUri();
 
 		const workingUri = await Container.git.getWorkingUri(gitUri.repoPath!, uri);
-		if (workingUri === undefined) {
-			return window.showWarningMessage('Unable to open compare. File has been deleted from the working tree');
+		if (workingUri == null) {
+			void window.showWarningMessage('Unable to open compare. File has been deleted from the working tree');
+
+			return;
 		}
 
-		const diffArgs: DiffWithCommandArgs = {
+		void (await executeCommand<DiffWithCommandArgs>(Commands.DiffWith, {
 			repoPath: gitUri.repoPath,
 			lhs: {
 				sha: gitUri.sha,
-				uri: uri
+				uri: uri,
 			},
 			rhs: {
 				sha: '',
-				uri: workingUri
+				uri: workingUri,
 			},
 			line: args.line,
-			showOptions: args.showOptions
-		};
-		return commands.executeCommand(Commands.DiffWith, diffArgs);
+			showOptions: args.showOptions,
+		}));
 	}
 }

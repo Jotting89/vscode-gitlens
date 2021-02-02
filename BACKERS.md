@@ -1,44 +1,27 @@
-<h1 align="center">Sponsors &amp; Backers</h1>
+# Sponsors
 
-To my incredible backers &mdash; thank you so much for your contributions. I am truly humbled by your generosity and support. Please know that your support plays an important role in helping me realize GitLens' potential in making developer's lives easier.
+&#x1f496; To my incredible sponsors &mdash; thank you so much for your contributions. I am truly humbled by your generosity and support. If you'd like to join in sponsoring GitLens, please [click here](https://gitlens.amod.io/#sponsor).
 
-If you'd like to join in supporting GitLens, please consider:
+## Corporate Sponsors
 
-- [Become a backer or sponsor on Patreon](https://www.patreon.com/eamodio)
-- [PayPal donations](https://www.paypal.me/eamodio)
-- [Cash App donations](https://www.paypal.me/eamodio)
-
-<h2 align="center">Gold Sponsors ($100+)</h2>
-
-<p align="center" style="margin: 0 10%">
-  <a title="Try CodeStream" href="https://codestream.com/?utm_source=vscmarket&utm_medium=banner&utm_campaign=gitlens"><img src="https://alt-images.codestream.com/codestream_logo_gitlens_vscmarket.png" alt="CodeStream Logo"/></a>
+<p align="center" style="display:flex;flex-wrap:wrap;justify-content:center">
+  <a title="Try CodeStream &mdash; Pull Requests and Code Reviews in your IDE" href="https://sponsorlink.codestream.com/?utm_source=vscmarket&utm_medium=banner&utm_campaign=gitlens"><img style="margin:8px 1em;" src="https://alt-images.codestream.com/codestream_logo_gitlens_vscmarket.png" alt="CodeStream Logo &mdash; Pull Requests and Code Reviews in your IDE"/></a>
+  <a title="Visit Embark Studios" href="https://embark-studios.com"><img style="margin:8px 1em;" src="https://raw.githubusercontent.com/eamodio/vscode-gitlens/main/images/docs/sponsors/embark-studios_dark.png" alt="Embark Studios Logo"/></a>
+  <a title="Visit Localize" href="https://localizejs.com"><img style="margin:8px 1em;" src="https://raw.githubusercontent.com/eamodio/vscode-gitlens/main/images/docs/sponsors/localize_dark.png" alt="Localize Logo"/></a>
+  <a title="Try Tabnine Autocomplete" href="http://wd5a.2.vu/GitLens"><img style="margin:8px 1em;" src="https://raw.githubusercontent.com/eamodio/vscode-gitlens/main/images/docs/sponsors/tabnine.png" alt="Tabnine Logo"/></a>
+  <a title="Visit Crésus" href="https://cresus.ch"><img style="margin:8px 1em;" src="https://raw.githubusercontent.com/eamodio/vscode-gitlens/main/images/docs/sponsors/cresus.png" alt="Crésus Logo"/></a>
 </p>
 
-<p align="center" style="margin: 0 10%">
-  <a title="Visit Crésus" href="https://cresus.ch"><img src="https://raw.githubusercontent.com/eamodio/vscode-gitlens/master/images/docs/sponsors/cresus.png" alt="Crésus Logo"/></a>
-</p>
-
-<h2 align="center">Silver Sponsors ($50+)</h2>
-
-None currently &mdash; could be you or your company here!
-
-<h2 align="center">Bronze Sponsors ($25+)</h2>
-
-None currently &mdash; could be you or your company here!
-
-<h2 align="center">Generous Backers ($10+)</h2>
+## User Sponsors
 
 - Borek Bernard
 - Jack
 - Ken Howard
-- Michael Duffy (former Silver Sponsor)
+- Michael Duffy
 - Michael Scott-Nelson
 - MrG0lden
 - Sergey Cheperis
 - Xananax
-
-<h2 align="center">Backers</h2>
-
 - Andreas Fertsch-Röver
 - Bill
 - Brandon Burroughs
@@ -63,3 +46,12 @@ None currently &mdash; could be you or your company here!
 - Sunny Gupta
 - Vance Dubberly
 - Øyvind de Freitas Sørensen
+- Kori Roys
+- Michael Lang
+- Ian Maclean
+- Sergey Cheperis
+- Asem Hasna
+- gb
+- John Sweeney
+- ember arlynx
+- Bharat Arimilli

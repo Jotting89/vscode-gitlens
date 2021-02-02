@@ -1,11 +1,10 @@
 'use strict';
-/* eslint-disable constructor-super */
 import * as paths from 'path';
 import { Uri } from 'vscode';
 import { UriComparer } from '../comparers';
-import { DocumentSchemes, GlyphChars } from '../constants';
+import { DocumentSchemes } from '../constants';
 import { Container } from '../container';
-import { GitCommit, GitFile, GitService } from '../git/gitService';
+import { GitCommit, GitFile, GitRevision } from '../git/git';
 import { Logger } from '../logger';
 import { debug, memoize, Strings } from '../system';
 
@@ -57,22 +56,27 @@ export class GitUri extends ((Uri as any) as UriEx) {
 		if (uri.scheme === DocumentSchemes.GitLens) {
 			const data = JSON.parse(uri.query) as UriRevisionData;
 
-			// When Uri's come from the FileSystemProvider, the uri.query only contains the root repo info (not the actual file path), so fix that here
-			const index = uri.path.indexOf(data.path);
-			if (index + data.path.length < uri.path.length) {
-				data.path = index === 0 ? uri.path : uri.path.substr(index);
+			// Fixes issues with uri.query:
+			// When Uri's come from the FileSystemProvider, the uri.query only contains the root repo info (not the actual file path)
+			// When Uri's come from breadcrumbs (via the FileSystemProvider), the uri.query contains the wrong file path
+			if (data.path !== uri.path) {
+				if (data.path.startsWith('//') && !uri.path.startsWith('//')) {
+					data.path = `/${uri.path}`;
+				} else {
+					data.path = uri.path;
+				}
 			}
 
 			super({
 				scheme: uri.scheme,
 				authority: uri.authority,
-				path: uri.path,
+				path: data.path,
 				query: JSON.stringify(data),
-				fragment: uri.fragment
+				fragment: uri.fragment,
 			});
 
 			this.repoPath = data.repoPath;
-			if (GitService.isUncommittedStaged(data.ref) || !GitService.isUncommitted(data.ref)) {
+			if (GitRevision.isUncommittedStaged(data.ref) || !GitRevision.isUncommitted(data.ref)) {
 				this.sha = data.ref;
 			}
 
@@ -95,7 +99,7 @@ export class GitUri extends ((Uri as any) as UriEx) {
 
 		const [authority, fsPath] = GitUri.ensureValidUNCPath(
 			uri.authority,
-			GitUri.resolve(commitOrRepoPath.fileName || uri.fsPath, commitOrRepoPath.repoPath)
+			GitUri.resolve(commitOrRepoPath.fileName ?? uri.fsPath, commitOrRepoPath.repoPath),
 		);
 
 		let path;
@@ -121,11 +125,11 @@ export class GitUri extends ((Uri as any) as UriEx) {
 			authority: authority,
 			path: path,
 			query: uri.query,
-			fragment: uri.fragment
+			fragment: uri.fragment,
 		});
 		this.repoPath = commitOrRepoPath.repoPath;
 		this.versionedPath = commitOrRepoPath.versionedPath;
-		if (GitService.isUncommittedStaged(commitOrRepoPath.sha) || !GitService.isUncommitted(commitOrRepoPath.sha)) {
+		if (GitRevision.isUncommittedStaged(commitOrRepoPath.sha) || !GitRevision.isUncommitted(commitOrRepoPath.sha)) {
 			this.sha = commitOrRepoPath.sha;
 		}
 	}
@@ -142,12 +146,12 @@ export class GitUri extends ((Uri as any) as UriEx) {
 
 	@memoize()
 	get isUncommitted() {
-		return GitService.isUncommitted(this.sha);
+		return GitRevision.isUncommitted(this.sha);
 	}
 
 	@memoize()
 	get isUncommittedStaged() {
-		return GitService.isUncommittedStaged(this.sha);
+		return GitRevision.isUncommittedStaged(this.sha);
 	}
 
 	@memoize()
@@ -164,10 +168,10 @@ export class GitUri extends ((Uri as any) as UriEx) {
 
 	@memoize()
 	get shortSha() {
-		return GitService.shortenSha(this.sha);
+		return GitRevision.shorten(this.sha);
 	}
 
-	@memoize<GitUri['documentUri']>(options => `${options!.useVersionedPath ? 'versioned' : ''}`)
+	@memoize<GitUri['documentUri']>(options => `${options?.useVersionedPath ? 'versioned' : ''}`)
 	documentUri({ useVersionedPath }: { useVersionedPath?: boolean } = {}) {
 		if (useVersionedPath && this.versionedPath !== undefined) return GitUri.file(this.versionedPath);
 		if (this.scheme !== 'file') return this;
@@ -181,15 +185,12 @@ export class GitUri extends ((Uri as any) as UriEx) {
 		return this.sha === (GitUri.is(uri) ? uri.sha : undefined);
 	}
 
-	getFormattedPath(options: { relativeTo?: string; separator?: string; suffix?: string } = {}): string {
-		const {
-			relativeTo = this.repoPath,
-			separator = Strings.pad(GlyphChars.Dot, 2, 2),
-			suffix = emptyStr
-		} = options;
+	getFormattedFilename(options: { suffix?: string; truncateTo?: number } = {}): string {
+		return GitUri.getFormattedFilename(this.fsPath, options);
+	}
 
-		const directory = GitUri.getDirectory(this.fsPath, relativeTo);
-		return `${paths.basename(this.fsPath)}${suffix}${directory ? `${separator}${directory}` : emptyStr}`;
+	getFormattedPath(options: { relativeTo?: string; suffix?: string; truncateTo?: number } = {}): string {
+		return GitUri.getFormattedPath(this.fsPath, { relativeTo: this.repoPath, ...options });
 	}
 
 	@memoize()
@@ -228,18 +229,14 @@ export class GitUri extends ((Uri as any) as UriEx) {
 
 		return new GitUri(commit.previousUri, {
 			repoPath: commit.repoPath,
-			sha: commit.previousSha
+			sha: commit.previousSha,
 		});
 	}
 
-	static fromFile(fileName: string, repoPath: string, ref?: string): GitUri;
-	static fromFile(file: GitFile, repoPath: string, ref?: string, original?: boolean): GitUri;
-	static fromFile(fileOrName: GitFile | string, repoPath: string, ref?: string, original: boolean = false): GitUri {
+	static fromFile(file: string | GitFile, repoPath: string, ref?: string, original: boolean = false): GitUri {
 		const uri = GitUri.resolveToUri(
-			typeof fileOrName === 'string'
-				? fileOrName
-				: (original && fileOrName.originalFileName) || fileOrName.fileName,
-			repoPath
+			typeof file === 'string' ? file : (original && file.originalFileName) || file.fileName,
+			repoPath,
 		);
 		return ref == null || ref.length === 0
 			? new GitUri(uri, repoPath)
@@ -257,9 +254,9 @@ export class GitUri extends ((Uri as any) as UriEx) {
 	}
 
 	@debug({
-		exit: uri => `returned ${Logger.toLoggable(uri)}`
+		exit: uri => `returned ${Logger.toLoggable(uri)}`,
 	})
-	static async fromUri(uri: Uri) {
+	static async fromUri(uri: Uri): Promise<GitUri> {
 		if (GitUri.is(uri)) return uri;
 
 		if (!Container.git.isTrackable(uri)) return new GitUri(uri);
@@ -277,7 +274,7 @@ export class GitUri extends ((Uri as any) as UriEx) {
 				switch (data.ref) {
 					case emptyStr:
 					case '~':
-						ref = GitService.uncommittedStagedSha;
+						ref = GitRevision.uncommittedStaged;
 						break;
 
 					case null:
@@ -292,7 +289,7 @@ export class GitUri extends ((Uri as any) as UriEx) {
 				const commitish: GitCommitish = {
 					fileName: data.path,
 					repoPath: repoPath!,
-					sha: ref
+					sha: ref,
 				};
 				return new GitUri(uri, commitish);
 			} catch {}
@@ -320,7 +317,7 @@ export class GitUri extends ((Uri as any) as UriEx) {
 				const commitish: GitCommitish = {
 					fileName: data.fileName,
 					repoPath: repoPath,
-					sha: data.isBase ? data.baseCommit : data.headCommit
+					sha: data.isBase ? data.baseCommit : data.headCommit,
 				};
 				return new GitUri(uri, commitish);
 			} catch {}
@@ -331,32 +328,82 @@ export class GitUri extends ((Uri as any) as UriEx) {
 
 	static getDirectory(fileName: string, relativeTo?: string): string {
 		let directory: string | undefined = paths.dirname(fileName);
-		if (relativeTo !== undefined) {
-			directory = paths.relative(relativeTo, directory);
-		}
-		directory = Strings.normalizePath(directory);
+		directory = relativeTo != null ? GitUri.relativeTo(directory, relativeTo) : Strings.normalizePath(directory);
 		return directory == null || directory.length === 0 || directory === '.' ? emptyStr : directory;
 	}
 
-	static getFormattedPath(
+	static getFormattedFilename(
 		fileNameOrUri: string | Uri,
-		options: { relativeTo?: string; separator?: string; suffix?: string } = {}
+		options: {
+			suffix?: string;
+			truncateTo?: number;
+		} = {},
 	): string {
-		const { relativeTo, separator = Strings.pad(GlyphChars.Dot, 2, 2), suffix = emptyStr } = options;
+		const { suffix = emptyStr, truncateTo } = options;
 
 		let fileName: string;
 		if (fileNameOrUri instanceof Uri) {
-			if (GitUri.is(fileNameOrUri)) return fileNameOrUri.getFormattedPath(options);
-
 			fileName = fileNameOrUri.fsPath;
 		} else {
 			fileName = fileNameOrUri;
 		}
 
+		let file = paths.basename(fileName);
+		if (truncateTo != null && file.length >= truncateTo) {
+			return Strings.truncateMiddle(file, truncateTo);
+		}
+
+		if (suffix) {
+			if (truncateTo != null && file.length + suffix.length >= truncateTo) {
+				return `${Strings.truncateMiddle(file, truncateTo - suffix.length)}${suffix}`;
+			}
+
+			file += suffix;
+		}
+
+		return file;
+	}
+
+	static getFormattedPath(
+		fileNameOrUri: string | Uri,
+		options: {
+			relativeTo?: string;
+			suffix?: string;
+			truncateTo?: number;
+		},
+	): string {
+		const { relativeTo, suffix = emptyStr, truncateTo } = options;
+
+		let fileName: string;
+		if (fileNameOrUri instanceof Uri) {
+			fileName = fileNameOrUri.fsPath;
+		} else {
+			fileName = fileNameOrUri;
+		}
+
+		let file = paths.basename(fileName);
+		if (truncateTo != null && file.length >= truncateTo) {
+			return Strings.truncateMiddle(file, truncateTo);
+		}
+
+		if (suffix) {
+			if (truncateTo != null && file.length + suffix.length >= truncateTo) {
+				return `${Strings.truncateMiddle(file, truncateTo - suffix.length)}${suffix}`;
+			}
+
+			file += suffix;
+		}
+
 		const directory = GitUri.getDirectory(fileName, relativeTo);
-		return !directory
-			? `${paths.basename(fileName)}${suffix}`
-			: `${paths.basename(fileName)}${suffix}${separator}${directory}`;
+		if (!directory) return file;
+
+		file = `/${file}`;
+
+		if (truncateTo != null && file.length + directory.length >= truncateTo) {
+			return `${Strings.truncateLeft(directory, truncateTo - file.length)}${file}`;
+		}
+
+		return `${directory}${file}`;
 	}
 
 	static relativeTo(fileNameOrUri: string | Uri, relativeTo: string | undefined): string {
@@ -376,9 +423,9 @@ export class GitUri extends ((Uri as any) as UriEx) {
 				JSON.stringify({
 					// Ensure we use the fsPath here, otherwise the url won't open properly
 					path: Uri.file(path).fsPath,
-					ref: '~'
-				})
-			)}`
+					ref: '~',
+				}),
+			)}`,
 		);
 	}
 
@@ -421,11 +468,14 @@ export class GitUri extends ((Uri as any) as UriEx) {
 			if (typeof fileNameOrFile === 'string') {
 				fileName = fileNameOrFile;
 			} else {
-				fileName = GitUri.resolve(fileNameOrFile!.fileName, repoPath);
+				//if (fileNameOrFile!.status === 'D') {
+				fileName = GitUri.resolve(fileNameOrFile!.originalFileName ?? fileNameOrFile!.fileName, repoPath);
+				// } else {
+				// 	fileName = GitUri.resolve(fileNameOrFile!.fileName, repoPath);
 			}
 
 			ref = uriOrRef;
-			shortSha = GitService.shortenSha(ref);
+			shortSha = GitRevision.shorten(ref);
 		} else {
 			fileName = uriOrRef.fsPath;
 
@@ -438,15 +488,15 @@ export class GitUri extends ((Uri as any) as UriEx) {
 			return Uri.file(fileName);
 		}
 
-		if (GitService.isUncommitted(ref)) {
-			return GitService.isUncommittedStaged(ref) ? GitUri.git(fileName, repoPath) : Uri.file(fileName);
+		if (GitRevision.isUncommitted(ref)) {
+			return GitRevision.isUncommittedStaged(ref) ? GitUri.git(fileName, repoPath) : Uri.file(fileName);
 		}
 
 		const filePath = Strings.normalizePath(fileName, { addLeadingSlash: true });
 		const data: UriRevisionData = {
 			path: filePath,
 			ref: ref,
-			repoPath: Strings.normalizePath(repoPath!)
+			repoPath: Strings.normalizePath(repoPath!),
 		};
 
 		const uri = Uri.parse(
@@ -454,7 +504,7 @@ export class GitUri extends ((Uri as any) as UriEx) {
 			`${DocumentSchemes.GitLens}://${encodeURIComponent(shortSha.replace(/\//g, '\u200A\u2215\u200A'))}${
 				// Change encoded / back to / otherwise uri parsing won't work properly
 				filePath === slash ? emptyStr : encodeURIComponent(filePath).replace(/%2F/g, slash)
-			}?${encodeURIComponent(JSON.stringify(data))}`
+			}?${encodeURIComponent(JSON.stringify(data))}`,
 		);
 		return uri;
 	}

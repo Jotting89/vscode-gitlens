@@ -12,70 +12,36 @@ export interface Event<T> {
 
 type Listener<T> = [(e: T) => void, any] | ((e: T) => void);
 
-export interface EmitterOptions {
-	onFirstListenerAdd?: Function;
-	onFirstListenerDidAdd?: Function;
-	onListenerDidAdd?: Function;
-	onLastListenerRemove?: Function;
-	leakWarningThreshold?: number;
-}
-
 export class Emitter<T> {
-	// eslint-disable-next-line  @typescript-eslint/no-empty-function
-	private static readonly _noop = function() {};
+	private static readonly _noop = function () {
+		/* noop */
+	};
 
-	private readonly _options?: EmitterOptions;
 	private _disposed: boolean = false;
 	private _event?: Event<T>;
 	private _deliveryQueue?: LinkedList<[Listener<T>, T]>;
-	protected _listeners?: LinkedList<Listener<T>>;
-
-	constructor(options?: EmitterOptions) {
-		this._options = options;
-	}
+	protected listeners?: LinkedList<Listener<T>>;
 
 	/**
 	 * For the public to allow to subscribe
 	 * to events from this Emitter
 	 */
 	get event(): Event<T> {
-		if (!this._event) {
+		if (this._event == null) {
 			this._event = (listener: (e: T) => any, thisArgs?: any, disposables?: Disposable[]) => {
-				if (!this._listeners) {
-					this._listeners = new LinkedList();
+				if (this.listeners == null) {
+					this.listeners = new LinkedList();
 				}
 
-				const firstListener = this._listeners.isEmpty();
+				const remove = this.listeners.push(thisArgs == null ? listener : [listener, thisArgs]);
 
-				if (firstListener && this._options && this._options.onFirstListenerAdd) {
-					this._options.onFirstListenerAdd(this);
-				}
-
-				const remove = this._listeners.push(!thisArgs ? listener : [listener, thisArgs]);
-
-				if (firstListener && this._options && this._options.onFirstListenerDidAdd) {
-					this._options.onFirstListenerDidAdd(this);
-				}
-
-				if (this._options && this._options.onListenerDidAdd) {
-					this._options.onListenerDidAdd(this, listener, thisArgs);
-				}
-
-				let result: Disposable;
-				// eslint-disable-next-line prefer-const
-				result = {
+				const result = {
 					dispose: () => {
 						result.dispose = Emitter._noop;
 						if (!this._disposed) {
 							remove();
-							if (this._options && this._options.onLastListenerRemove) {
-								const hasListeners = this._listeners && !this._listeners.isEmpty();
-								if (!hasListeners) {
-									this._options.onLastListenerRemove(this);
-								}
-							}
 						}
-					}
+					},
 				};
 				if (Array.isArray(disposables)) {
 					disposables.push(result);
@@ -92,16 +58,16 @@ export class Emitter<T> {
 	 * subscribers
 	 */
 	fire(event: T): void {
-		if (this._listeners) {
+		if (this.listeners != null) {
 			// put all [listener,event]-pairs into delivery queue
 			// then emit all event. an inner/nested event might be
 			// the driver of this
 
-			if (!this._deliveryQueue) {
+			if (this._deliveryQueue == null) {
 				this._deliveryQueue = new LinkedList();
 			}
 
-			for (let iter = this._listeners.iterator(), e = iter.next(); !e.done; e = iter.next()) {
+			for (let iter = this.listeners.iterator(), e = iter.next(); !e.done; e = iter.next()) {
 				this._deliveryQueue.push([e.value, event]);
 			}
 
@@ -109,8 +75,7 @@ export class Emitter<T> {
 				const [listener, event] = this._deliveryQueue.shift()!;
 				try {
 					if (typeof listener === 'function') {
-						// eslint-disable-next-line no-useless-call
-						listener.call(undefined, event);
+						listener(event);
 					} else {
 						listener[0].call(listener[1], event);
 					}
@@ -123,12 +88,8 @@ export class Emitter<T> {
 	}
 
 	dispose() {
-		if (this._listeners) {
-			this._listeners.clear();
-		}
-		if (this._deliveryQueue) {
-			this._deliveryQueue.clear();
-		}
+		this.listeners?.clear();
+		this._deliveryQueue?.clear();
 		this._disposed = true;
 	}
 }
@@ -264,19 +225,19 @@ class LinkedList<E> {
 		let element: { done: false; value: E };
 		let node = this._first;
 		return {
-			next: function(): IteratorResult<E> {
+			next: function (): IteratorResult<E> {
 				if (node === Node.Undefined) {
 					return FIN;
 				}
 
-				if (!element) {
+				if (element == null) {
 					element = { done: false, value: node.element };
 				} else {
 					element.value = node.element;
 				}
 				node = node.next;
 				return element;
-			}
+			},
 		};
 	}
 

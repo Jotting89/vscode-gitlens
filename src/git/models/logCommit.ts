@@ -1,14 +1,15 @@
 'use strict';
 import { Uri } from 'vscode';
-import { memoize, Strings } from '../../system';
-import { GitUri } from '../gitUri';
 import { GitCommit, GitCommitType } from './commit';
 import { GitFile, GitFileStatus } from './file';
+import { GitUri } from '../gitUri';
+import { GitReference } from './models';
+import { memoize, Strings } from '../../system';
 
 const emptyStats = Object.freeze({
 	added: 0,
 	deleted: 0,
-	changed: 0
+	changed: 0,
 });
 
 export interface GitLogCommitLine {
@@ -23,6 +24,10 @@ export interface GitLogCommitLine {
 }
 
 export class GitLogCommit extends GitCommit {
+	static isOfRefType(commit: GitReference | undefined) {
+		return commit?.refType === 'revision';
+	}
+
 	static is(commit: any): commit is GitLogCommit {
 		return (
 			commit instanceof GitLogCommit
@@ -57,7 +62,7 @@ export class GitLogCommit extends GitCommit {
 			  }
 			| undefined,
 		public readonly parentShas?: string[],
-		public readonly line?: GitLogCommitLine
+		public readonly line?: GitLogCommitLine,
 	) {
 		super(
 			type,
@@ -70,13 +75,18 @@ export class GitLogCommit extends GitCommit {
 			message,
 			fileName,
 			originalFileName,
-			previousSha || `${sha}^`,
-			previousFileName
+			previousSha ?? `${sha}^`,
+			previousFileName,
 		);
 	}
 
+	@memoize()
+	get hasConflicts() {
+		return this.files.some(f => f.conflictStatus != null);
+	}
+
 	get isMerge() {
-		return this.parentShas && this.parentShas.length > 1;
+		return this.parentShas != null && this.parentShas.length > 1;
 	}
 
 	get nextUri(): Uri {
@@ -87,13 +97,18 @@ export class GitLogCommit extends GitCommit {
 		return this.isFile ? this.previousSha! : `${this.sha}^`;
 	}
 
+	findFile(fileName: string): GitFile | undefined {
+		fileName = GitUri.relativeTo(fileName, this.repoPath);
+		return this.files.find(f => f.fileName === fileName);
+	}
+
 	@memoize()
 	getDiffStatus() {
 		if (this._fileStats !== undefined) {
 			return {
 				added: this._fileStats.insertions,
 				deleted: this._fileStats.deletions,
-				changed: 0
+				changed: 0,
 			};
 		}
 
@@ -102,7 +117,7 @@ export class GitLogCommit extends GitCommit {
 		const diff = {
 			added: 0,
 			deleted: 0,
-			changed: 0
+			changed: 0,
 		};
 		for (const f of this.files) {
 			switch (f.status) {
@@ -128,7 +143,7 @@ export class GitLogCommit extends GitCommit {
 		expand,
 		prefix = '',
 		separator = ' ',
-		suffix = ''
+		suffix = '',
 	}: {
 		compact?: boolean;
 		empty?: string;
@@ -138,7 +153,7 @@ export class GitLogCommit extends GitCommit {
 		suffix?: string;
 	} = {}): string {
 		const { added, changed, deleted } = this.getDiffStatus();
-		if (added === 0 && changed === 0 && deleted === 0) return empty || '';
+		if (added === 0 && changed === 0 && deleted === 0) return empty ?? '';
 
 		if (expand) {
 			const type = this.isFile ? 'line' : 'file';
@@ -162,19 +177,14 @@ export class GitLogCommit extends GitCommit {
 		}${compact && deleted === 0 ? '' : `-${deleted}`}${suffix}`;
 	}
 
-	toFileCommit(fileName: string): GitLogCommit | undefined;
-	toFileCommit(file: GitFile): GitLogCommit;
-	toFileCommit(fileNameOrFile: string | GitFile): GitLogCommit | undefined {
-		const fileName =
-			typeof fileNameOrFile === 'string'
-				? GitUri.relativeTo(fileNameOrFile, this.repoPath)
-				: fileNameOrFile.fileName;
-		const file = this.files.find(f => f.fileName === fileName);
-		if (file === undefined) return undefined;
+	toFileCommit(file: string | GitFile): GitLogCommit | undefined {
+		const fileName = typeof file === 'string' ? GitUri.relativeTo(file, this.repoPath) : file.fileName;
+		const foundFile = this.files.find(f => f.fileName === fileName);
+		if (foundFile == null) return undefined;
 
 		let sha;
 		// If this is a stash commit with an untracked file
-		if (this.type === GitCommitType.Stash && file.status === '?') {
+		if (this.type === GitCommitType.Stash && foundFile.status === '?') {
 			sha = `${this.sha}^3`;
 		}
 
@@ -184,12 +194,12 @@ export class GitLogCommit extends GitCommit {
 		return this.with({
 			type: this.isStash ? GitCommitType.StashFile : GitCommitType.LogFile,
 			sha: sha,
-			fileName: file.fileName,
-			originalFileName: file.originalFileName,
+			fileName: foundFile.fileName,
+			originalFileName: foundFile.originalFileName,
 			previousSha: previousSha,
-			previousFileName: file.originalFileName || file.fileName,
-			status: file.status,
-			files: [file]
+			previousFileName: foundFile.originalFileName ?? foundFile.fileName,
+			status: foundFile.status,
+			files: [foundFile],
 		});
 	}
 
@@ -209,23 +219,23 @@ export class GitLogCommit extends GitCommit {
 		files?: GitFile[] | null;
 	}): GitLogCommit {
 		return new GitLogCommit(
-			changes.type || this.type,
+			changes.type ?? this.type,
 			this.repoPath,
 			this.getChangedValue(changes.sha, this.sha)!,
-			changes.author || this.author,
-			changes.email || this.email,
-			changes.authorDate || this.authorDate,
-			changes.committedDate || this.committerDate,
-			changes.message || this.message,
-			changes.fileName || this.fileName,
-			this.getChangedValue(changes.files, this.files) || [],
-			changes.status || this.status,
+			changes.author ?? this.author,
+			changes.email ?? this.email,
+			changes.authorDate ?? this.authorDate,
+			changes.committedDate ?? this.committerDate,
+			changes.message ?? this.message,
+			changes.fileName ?? this.fileName,
+			this.getChangedValue(changes.files, this.files) ?? [],
+			changes.status ?? this.status,
 			this.getChangedValue(changes.originalFileName, this.originalFileName),
 			this.getChangedValue(changes.previousSha, this.previousSha),
 			this.getChangedValue(changes.previousFileName, this.previousFileName),
 			this._fileStats,
 			this.parentShas,
-			this.line
+			this.line,
 		);
 	}
 }

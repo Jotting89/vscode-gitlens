@@ -1,8 +1,9 @@
 'use strict';
+import { filterMap } from '../array';
 import { LogCorrelationContext, Logger, TraceLevel } from '../../logger';
-import { Functions } from '../function';
-import { Promises } from '../promise';
-import { Strings } from '../string';
+import { getParameters } from '../function';
+import { is as isPromise } from '../promise';
+import { getDurationMilliseconds } from '../string';
 
 const emptyStr = '';
 
@@ -17,7 +18,7 @@ export function getCorrelationId() {
 	return correlationCounter;
 }
 
-function getNextCorrelationId() {
+export function getNextCorrelationId() {
 	if (correlationCounter === Number.MAX_SAFE_INTEGER) {
 		correlationCounter = 0;
 	}
@@ -50,7 +51,7 @@ export function logName<T>(fn: (c: T, name: string) => string) {
 
 export function debug<T extends (...arg: any) => any>(
 	options: {
-		args?: false | { [arg: string]: (arg: any) => string | false };
+		args?: false | Record<string, (arg: any) => string | false>;
 		condition?(...args: Parameters<T>): boolean;
 		correlate?: boolean;
 		enter?(...args: Parameters<T>): string;
@@ -59,7 +60,7 @@ export function debug<T extends (...arg: any) => any>(
 		sanitize?(key: string, value: any): any;
 		singleLine?: boolean;
 		timed?: boolean;
-	} = { timed: true }
+	} = { timed: true },
 ) {
 	return log<T>({ debug: true, ...options });
 }
@@ -68,7 +69,7 @@ type PromiseType<T> = T extends Promise<infer U> ? U : T;
 
 export function log<T extends (...arg: any) => any>(
 	options: {
-		args?: false | { [arg: number]: (arg: any) => string | false };
+		args?: false | Record<number, (arg: any) => string | false>;
 		condition?(...args: Parameters<T>): boolean;
 		correlate?: boolean;
 		debug?: boolean;
@@ -78,7 +79,7 @@ export function log<T extends (...arg: any) => any>(
 		sanitize?(key: string, value: any): any;
 		singleLine?: boolean;
 		timed?: boolean;
-	} = { timed: true }
+	} = { timed: true },
 ) {
 	options = { timed: true, ...options };
 
@@ -86,18 +87,21 @@ export function log<T extends (...arg: any) => any>(
 		| typeof Logger.debug
 		| typeof Logger.log;
 
-	return (target: any, key: string, descriptor: PropertyDescriptor) => {
+	return (target: any, key: string, descriptor: PropertyDescriptor & Record<string, any>) => {
 		let fn: Function | undefined;
+		let fnKey: string | undefined;
 		if (typeof descriptor.value === 'function') {
 			fn = descriptor.value;
+			fnKey = 'value';
 		} else if (typeof descriptor.get === 'function') {
 			fn = descriptor.get;
+			fnKey = 'get';
 		}
-		if (fn == null) throw new Error('Not supported');
+		if (fn == null || fnKey == null) throw new Error('Not supported');
 
-		const parameters = Functions.getParameters(fn);
+		const parameters = getParameters(fn);
 
-		descriptor.value = function(this: any, ...args: Parameters<T>) {
+		descriptor[fnKey] = function (this: any, ...args: Parameters<T>) {
 			const correlationId = getNextCorrelationId();
 
 			if (
@@ -112,7 +116,8 @@ export function log<T extends (...arg: any) => any>(
 			let instanceName: string;
 			if (this != null) {
 				instanceName = Logger.toLoggableName(this);
-				if (this.constructor != null && this.constructor[LogInstanceNameFn]) {
+				// eslint-disable-next-line @typescript-eslint/strict-boolean-expressions
+				if (this.constructor?.[LogInstanceNameFn]) {
 					instanceName = target.constructor[LogInstanceNameFn](this, instanceName);
 				}
 			} else {
@@ -135,9 +140,9 @@ export function log<T extends (...arg: any) => any>(
 						instance: this,
 						instanceName: instanceName,
 						name: key,
-						prefix: prefix
+						prefix: prefix,
 					},
-					...args
+					...args,
 				);
 			}
 
@@ -160,22 +165,19 @@ export function log<T extends (...arg: any) => any>(
 				const argFns = typeof options.args === 'object' ? options.args : undefined;
 				let argFn;
 				let loggable;
-				loggableParams = args
-					.map((v: any, index: number) => {
-						const p = parameters[index];
+				loggableParams = filterMap(args, (v: any, index: number) => {
+					const p = parameters[index];
 
-						argFn = argFns !== undefined ? argFns[index] : undefined;
-						if (argFn !== undefined) {
-							loggable = argFn(v);
-							if (loggable === false) return undefined;
-						} else {
-							loggable = Logger.toLoggable(v, options.sanitize);
-						}
+					argFn = argFns !== undefined ? argFns[index] : undefined;
+					if (argFn !== undefined) {
+						loggable = argFn(v);
+						if (loggable === false) return undefined;
+					} else {
+						loggable = Logger.toLoggable(v, options.sanitize);
+					}
 
-						return p ? `${p}=${loggable}` : loggable;
-					})
-					.filter(Boolean)
-					.join(', ');
+					return p ? `${p}=${loggable}` : loggable;
+				}).join(', ');
 
 				if (!options.singleLine) {
 					if (!options.debug) {
@@ -190,28 +192,23 @@ export function log<T extends (...arg: any) => any>(
 				const start = options.timed ? process.hrtime() : undefined;
 
 				const logError = (ex: Error) => {
-					const timing =
-						start !== undefined ? ` \u2022 ${Strings.getDurationMilliseconds(start)} ms` : emptyStr;
+					const timing = start !== undefined ? ` \u2022 ${getDurationMilliseconds(start)} ms` : emptyStr;
 					if (options.singleLine) {
 						Logger.error(
 							ex,
 							`${prefix}${enter}`,
 							`failed${
-								correlationContext !== undefined && correlationContext.exitDetails
-									? correlationContext.exitDetails
-									: emptyStr
+								correlationContext?.exitDetails ? correlationContext.exitDetails : emptyStr
 							}${timing}`,
-							loggableParams
+							loggableParams,
 						);
 					} else {
 						Logger.error(
 							ex,
 							prefix,
 							`failed${
-								correlationContext !== undefined && correlationContext.exitDetails
-									? correlationContext.exitDetails
-									: emptyStr
-							}${timing}`
+								correlationContext?.exitDetails ? correlationContext.exitDetails : emptyStr
+							}${timing}`,
 						);
 					}
 
@@ -229,8 +226,7 @@ export function log<T extends (...arg: any) => any>(
 				}
 
 				const logResult = (r: any) => {
-					const timing =
-						start !== undefined ? ` \u2022 ${Strings.getDurationMilliseconds(start)} ms` : emptyStr;
+					const timing = start !== undefined ? ` \u2022 ${getDurationMilliseconds(start)} ms` : emptyStr;
 					let exit;
 					if (options.exit != null) {
 						try {
@@ -246,29 +242,23 @@ export function log<T extends (...arg: any) => any>(
 						if (!options.debug) {
 							Logger.logWithDebugParams(
 								`${prefix}${enter} ${exit}${
-									correlationContext !== undefined && correlationContext.exitDetails
-										? correlationContext.exitDetails
-										: emptyStr
+									correlationContext?.exitDetails ? correlationContext.exitDetails : emptyStr
 								}${timing}`,
-								loggableParams
+								loggableParams,
 							);
 						} else {
 							logFn(
 								`${prefix}${enter} ${exit}${
-									correlationContext !== undefined && correlationContext.exitDetails
-										? correlationContext.exitDetails
-										: emptyStr
+									correlationContext?.exitDetails ? correlationContext.exitDetails : emptyStr
 								}${timing}`,
-								loggableParams
+								loggableParams,
 							);
 						}
 					} else {
 						logFn(
 							`${prefix} ${exit}${
-								correlationContext !== undefined && correlationContext.exitDetails
-									? correlationContext.exitDetails
-									: emptyStr
-							}${timing}`
+								correlationContext?.exitDetails ? correlationContext.exitDetails : emptyStr
+							}${timing}`,
 						);
 					}
 
@@ -277,7 +267,7 @@ export function log<T extends (...arg: any) => any>(
 					}
 				};
 
-				if (result != null && Promises.is(result)) {
+				if (result != null && isPromise(result)) {
 					const promise = result.then(logResult);
 					promise.catch(logError);
 				} else {

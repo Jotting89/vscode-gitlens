@@ -6,24 +6,34 @@ import {
 	Event,
 	EventEmitter,
 	ProgressLocation,
-	window
+	window,
 } from 'vscode';
 import {
 	configuration,
 	RepositoriesViewConfig,
 	ViewBranchesLayout,
 	ViewFilesLayout,
-	ViewsConfig,
-	ViewShowBranchComparison
+	ViewShowBranchComparison,
 } from '../configuration';
-import { CommandContext, setCommandContext, WorkspaceState } from '../constants';
+import { ContextKeys, setContext, WorkspaceState } from '../constants';
 import { Container } from '../container';
-import { GitBranch, GitLogCommit, GitService, GitStashCommit, GitTag } from '../git/gitService';
+import {
+	GitBranch,
+	GitBranchReference,
+	GitLogCommit,
+	GitReference,
+	GitRevisionReference,
+	GitStashReference,
+	GitTagReference,
+} from '../git/git';
 import {
 	BranchesNode,
 	BranchNode,
 	BranchOrTagFolderNode,
+	BranchTrackingStatusNode,
 	CompareBranchNode,
+	ContributorsNode,
+	ReflogNode,
 	RemoteNode,
 	RemotesNode,
 	RepositoriesNode,
@@ -31,12 +41,13 @@ import {
 	StashesNode,
 	StashNode,
 	TagsNode,
-	ViewNode
 } from './nodes';
 import { gate } from '../system';
 import { ViewBase } from './viewBase';
 
-export class RepositoriesView extends ViewBase<RepositoriesNode> {
+export class RepositoriesView extends ViewBase<RepositoriesNode, RepositoriesViewConfig> {
+	protected readonly configKey = 'repositories';
+
 	constructor() {
 		super('gitlens.views.repositories', 'Repositories');
 	}
@@ -50,93 +61,199 @@ export class RepositoriesView extends ViewBase<RepositoriesNode> {
 		return new RepositoriesNode(this);
 	}
 
-	protected get location(): string {
-		return this.config.location;
-	}
-
 	protected registerCommands() {
 		void Container.viewCommands;
 
 		commands.registerCommand(
 			this.getQualifiedCommand('copy'),
 			() => commands.executeCommand('gitlens.views.copy', this.selection),
-			this
+			this,
 		);
-		commands.registerCommand(this.getQualifiedCommand('refresh'), () => this.refresh(true), this);
+		commands.registerCommand(
+			this.getQualifiedCommand('refresh'),
+			async () => {
+				await Container.git.resetCaches('branches', 'contributors', 'remotes', 'stashes', 'status', 'tags');
+				return this.refresh(true);
+			},
+			this,
+		);
 		commands.registerCommand(
 			this.getQualifiedCommand('setBranchesLayoutToList'),
 			() => this.setBranchesLayout(ViewBranchesLayout.List),
-			this
+			this,
 		);
 		commands.registerCommand(
 			this.getQualifiedCommand('setBranchesLayoutToTree'),
 			() => this.setBranchesLayout(ViewBranchesLayout.Tree),
-			this
+			this,
 		);
 		commands.registerCommand(
 			this.getQualifiedCommand('setFilesLayoutToAuto'),
 			() => this.setFilesLayout(ViewFilesLayout.Auto),
-			this
+			this,
 		);
 		commands.registerCommand(
 			this.getQualifiedCommand('setFilesLayoutToList'),
 			() => this.setFilesLayout(ViewFilesLayout.List),
-			this
+			this,
 		);
 		commands.registerCommand(
 			this.getQualifiedCommand('setFilesLayoutToTree'),
 			() => this.setFilesLayout(ViewFilesLayout.Tree),
-			this
+			this,
 		);
-
 		commands.registerCommand(
 			this.getQualifiedCommand('setAutoRefreshToOn'),
 			() => this.setAutoRefresh(Container.config.views.repositories.autoRefresh, true),
-			this
+			this,
 		);
 		commands.registerCommand(
 			this.getQualifiedCommand('setAutoRefreshToOff'),
 			() => this.setAutoRefresh(Container.config.views.repositories.autoRefresh, false),
-			this
+			this,
+		);
+		commands.registerCommand(this.getQualifiedCommand('setShowAvatarsOn'), () => this.setShowAvatars(true), this);
+		commands.registerCommand(this.getQualifiedCommand('setShowAvatarsOff'), () => this.setShowAvatars(false), this);
+		commands.registerCommand(
+			this.getQualifiedCommand('setShowBranchComparisonOn'),
+			() => this.setShowBranchComparison(true),
+			this,
+		);
+		commands.registerCommand(
+			this.getQualifiedCommand('setShowBranchComparisonOff'),
+			() => this.setShowBranchComparison(false),
+			this,
+		);
+		commands.registerCommand(
+			this.getQualifiedCommand('setBranchesShowBranchComparisonOn'),
+			() => this.setBranchShowBranchComparison(true),
+			this,
+		);
+		commands.registerCommand(
+			this.getQualifiedCommand('setBranchesShowBranchComparisonOff'),
+			() => this.setBranchShowBranchComparison(false),
+			this,
 		);
 
 		commands.registerCommand(
-			this.getQualifiedCommand('setBranchComparisonToWorking'),
-			n => this.setBranchComparison(n, ViewShowBranchComparison.Working),
-			this
+			this.getQualifiedCommand('setShowBranchesOn'),
+			() => this.toggleSection('showBranches', true),
+			this,
 		);
 		commands.registerCommand(
-			this.getQualifiedCommand('setBranchComparisonToBranch'),
-			n => this.setBranchComparison(n, ViewShowBranchComparison.Branch),
-			this
+			this.getQualifiedCommand('setShowBranchesOff'),
+			() => this.toggleSection('showBranches', false),
+			this,
+		);
+
+		commands.registerCommand(
+			this.getQualifiedCommand('setShowCommitsOn'),
+			() => this.toggleSection('showCommits', true),
+			this,
+		);
+		commands.registerCommand(
+			this.getQualifiedCommand('setShowCommitsOff'),
+			() => this.toggleSection('showCommits', false),
+			this,
+		);
+
+		commands.registerCommand(
+			this.getQualifiedCommand('setShowContributorsOn'),
+			() => this.toggleSection('showContributors', true),
+			this,
+		);
+		commands.registerCommand(
+			this.getQualifiedCommand('setShowContributorsOff'),
+			() => this.toggleSection('showContributors', false),
+			this,
+		);
+
+		commands.registerCommand(
+			this.getQualifiedCommand('setShowRemotesOn'),
+			() => this.toggleSection('showRemotes', true),
+			this,
+		);
+		commands.registerCommand(
+			this.getQualifiedCommand('setShowRemotesOff'),
+			() => this.toggleSection('showRemotes', false),
+			this,
+		);
+
+		commands.registerCommand(
+			this.getQualifiedCommand('setShowStashesOn'),
+			() => this.toggleSection('showStashes', true),
+			this,
+		);
+		commands.registerCommand(
+			this.getQualifiedCommand('setShowStashesOff'),
+			() => this.toggleSection('showStashes', false),
+			this,
+		);
+
+		commands.registerCommand(
+			this.getQualifiedCommand('setShowTagsOn'),
+			() => this.toggleSection('showTags', true),
+			this,
+		);
+		commands.registerCommand(
+			this.getQualifiedCommand('setShowTagsOff'),
+			() => this.toggleSection('showTags', false),
+			this,
+		);
+
+		commands.registerCommand(
+			this.getQualifiedCommand('setShowUpstreamStatusOn'),
+			() => this.toggleSection('showUpstreamStatus', true),
+			this,
+		);
+		commands.registerCommand(
+			this.getQualifiedCommand('setShowUpstreamStatusOff'),
+			() => this.toggleSection('showUpstreamStatus', false),
+			this,
+		);
+
+		commands.registerCommand(
+			this.getQualifiedCommand('setShowSectionOff'),
+			(
+				node:
+					| BranchesNode
+					| BranchNode
+					| BranchTrackingStatusNode
+					| CompareBranchNode
+					| ContributorsNode
+					| ReflogNode
+					| RemotesNode
+					| StashesNode
+					| TagsNode,
+			) => this.toggleSectionByNode(node, false),
+			this,
 		);
 	}
 
-	protected onConfigurationChanged(e: ConfigurationChangeEvent) {
+	protected filterConfigurationChanged(e: ConfigurationChangeEvent) {
+		const changed = super.filterConfigurationChanged(e);
 		if (
-			!configuration.changed(e, 'views', 'repositories') &&
-			!configuration.changed(e, 'views') &&
+			!changed &&
 			!configuration.changed(e, 'defaultDateFormat') &&
+			!configuration.changed(e, 'defaultDateShortFormat') &&
 			!configuration.changed(e, 'defaultDateSource') &&
 			!configuration.changed(e, 'defaultDateStyle') &&
 			!configuration.changed(e, 'defaultGravatarsStyle') &&
+			!configuration.changed(e, 'defaultTimeFormat') &&
 			!configuration.changed(e, 'sortBranchesBy') &&
 			!configuration.changed(e, 'sortTagsBy')
 		) {
-			return;
+			return false;
 		}
 
-		if (configuration.changed(e, 'views', 'repositories', 'autoRefresh')) {
+		return true;
+	}
+	protected onConfigurationChanged(e: ConfigurationChangeEvent) {
+		if (configuration.changed(e, 'views', this.configKey, 'autoRefresh')) {
 			void this.setAutoRefresh(Container.config.views.repositories.autoRefresh);
 		}
 
-		if (configuration.changed(e, 'views', 'repositories', 'location')) {
-			this.initialize(this.config.location, { showCollapseAll: true });
-		}
-
-		if (!configuration.initializing(e) && this._root !== undefined) {
-			void this.refresh(true);
-		}
+		super.onConfigurationChanged(e);
 	}
 
 	get autoRefresh() {
@@ -146,11 +263,7 @@ export class RepositoriesView extends ViewBase<RepositoriesNode> {
 		);
 	}
 
-	get config(): ViewsConfig & RepositoriesViewConfig {
-		return { ...Container.config.views, ...Container.config.views.repositories };
-	}
-
-	findBranch(branch: GitBranch, token?: CancellationToken) {
+	findBranch(branch: GitBranchReference, token?: CancellationToken) {
 		const repoNodeId = RepositoryNode.getId(branch.repoPath);
 
 		if (branch.remote) {
@@ -164,7 +277,7 @@ export class RepositoriesView extends ViewBase<RepositoriesNode> {
 					if (n instanceof RemoteNode) {
 						if (!n.id.startsWith(repoNodeId)) return false;
 
-						return n.remote.name === branch.getRemoteName();
+						return branch.remote && n.remote.name === GitBranch.getRemote(branch.name); //branch.getRemoteName();
 					}
 
 					if (
@@ -178,7 +291,7 @@ export class RepositoriesView extends ViewBase<RepositoriesNode> {
 
 					return false;
 				},
-				token: token
+				token: token,
 			});
 		}
 
@@ -195,7 +308,7 @@ export class RepositoriesView extends ViewBase<RepositoriesNode> {
 
 				return false;
 			},
-			token: token
+			token: token,
 		});
 	}
 
@@ -214,7 +327,7 @@ export class RepositoriesView extends ViewBase<RepositoriesNode> {
 
 					if (n instanceof BranchNode) {
 						if (n.id.startsWith(repoNodeId) && branches.includes(n.branch.name)) {
-							await n.showMore({ until: commit.ref });
+							await n.loadMore({ until: commit.ref });
 							return true;
 						}
 					}
@@ -229,7 +342,7 @@ export class RepositoriesView extends ViewBase<RepositoriesNode> {
 
 					return false;
 				},
-				token: token
+				token: token,
 			});
 		}
 
@@ -260,11 +373,11 @@ export class RepositoriesView extends ViewBase<RepositoriesNode> {
 
 				return false;
 			},
-			token: token
+			token: token,
 		});
 	}
 
-	findStash(stash: GitStashCommit | { repoPath: string; ref: string }, token?: CancellationToken) {
+	findStash(stash: GitStashReference, token?: CancellationToken) {
 		const repoNodeId = RepositoryNode.getId(stash.repoPath);
 
 		return this.findNode(StashNode.getId(stash.repoPath, stash.ref), {
@@ -279,11 +392,11 @@ export class RepositoriesView extends ViewBase<RepositoriesNode> {
 
 				return false;
 			},
-			token: token
+			token: token,
 		});
 	}
 
-	findTag(tag: GitTag, token?: CancellationToken) {
+	findTag(tag: GitTagReference, token?: CancellationToken) {
 		const repoNodeId = RepositoryNode.getId(tag.repoPath);
 
 		return this.findNode((n: any) => n.tag !== undefined && n.tag.ref === tag.ref, {
@@ -299,33 +412,33 @@ export class RepositoriesView extends ViewBase<RepositoriesNode> {
 
 				return false;
 			},
-			token: token
+			token: token,
 		});
 	}
 
 	@gate(() => '')
 	revealBranch(
-		branch: GitBranch,
+		branch: GitBranchReference,
 		options?: {
 			select?: boolean;
 			focus?: boolean;
 			expand?: boolean | number;
-		}
+		},
 	) {
 		return window.withProgress(
 			{
 				location: ProgressLocation.Notification,
-				title: `Revealing branch '${branch.name}' in the Repositories view...`,
-				cancellable: true
+				title: `Revealing ${GitReference.toString(branch, { icon: false })} in the Repositories view...`,
+				cancellable: true,
 			},
 			async (progress, token) => {
 				const node = await this.findBranch(branch, token);
-				if (node === undefined) return node;
+				if (node == null) return undefined;
 
 				await this.ensureRevealNode(node, options);
 
 				return node;
-			}
+			},
 		);
 	}
 
@@ -336,7 +449,7 @@ export class RepositoriesView extends ViewBase<RepositoriesNode> {
 			select?: boolean;
 			focus?: boolean;
 			expand?: boolean | number;
-		}
+		},
 	) {
 		const repoNodeId = RepositoryNode.getId(repoPath);
 
@@ -351,7 +464,7 @@ export class RepositoriesView extends ViewBase<RepositoriesNode> {
 				}
 
 				return false;
-			}
+			},
 		});
 
 		if (node !== undefined) {
@@ -363,44 +476,76 @@ export class RepositoriesView extends ViewBase<RepositoriesNode> {
 
 	@gate(() => '')
 	async revealCommit(
-		commit: GitLogCommit | { repoPath: string; ref: string },
+		commit: GitRevisionReference,
 		options?: {
 			select?: boolean;
 			focus?: boolean;
 			expand?: boolean | number;
-		}
+		},
 	) {
 		return window.withProgress(
 			{
 				location: ProgressLocation.Notification,
-				title: `Revealing commit '${GitService.shortenSha(commit.ref)}' in the Repositories view...`,
-				cancellable: true
+				title: `Revealing ${GitReference.toString(commit, { icon: false })} in the Repositories view...`,
+				cancellable: true,
 			},
 			async (progress, token) => {
 				const node = await this.findCommit(commit, token);
-				if (node === undefined) return node;
+				if (node == null) return undefined;
 
 				await this.ensureRevealNode(node, options);
 
 				return node;
-			}
+			},
 		);
 	}
 
 	@gate(() => '')
-	async revealStash(
-		stash: GitStashCommit | { repoPath: string; ref: string; stashName: string },
+	async revealRepository(
+		repoPath: string,
 		options?: {
 			select?: boolean;
 			focus?: boolean;
 			expand?: boolean | number;
+		},
+	) {
+		const repoNodeId = RepositoryNode.getId(repoPath);
+
+		const node = await this.findNode(repoNodeId, {
+			maxDepth: 1,
+			canTraverse: n => {
+				// Only search for branches nodes in the same repo
+				if (n instanceof RepositoriesNode) return true;
+
+				// if (n instanceof RepositoryNode) {
+				// 	return n.id.startsWith(repoNodeId);
+				// }
+
+				return false;
+			},
+		});
+
+		if (node !== undefined) {
+			await this.reveal(node, options);
 		}
+
+		return node;
+	}
+
+	@gate(() => '')
+	async revealStash(
+		stash: GitStashReference,
+		options?: {
+			select?: boolean;
+			focus?: boolean;
+			expand?: boolean | number;
+		},
 	) {
 		return window.withProgress(
 			{
 				location: ProgressLocation.Notification,
-				title: `Revealing stash '${stash.stashName}' in the Repositories view...`,
-				cancellable: true
+				title: `Revealing ${GitReference.toString(stash, { icon: false })} in the Repositories view...`,
+				cancellable: true,
 			},
 			async (progress, token) => {
 				const node = await this.findStash(stash, token);
@@ -409,7 +554,7 @@ export class RepositoriesView extends ViewBase<RepositoriesNode> {
 				}
 
 				return node;
-			}
+			},
 		);
 	}
 
@@ -420,7 +565,7 @@ export class RepositoriesView extends ViewBase<RepositoriesNode> {
 			select?: boolean;
 			focus?: boolean;
 			expand?: boolean | number;
-		}
+		},
 	) {
 		const repoNodeId = RepositoryNode.getId(repoPath);
 
@@ -435,7 +580,7 @@ export class RepositoriesView extends ViewBase<RepositoriesNode> {
 				}
 
 				return false;
-			}
+			},
 		});
 
 		if (node !== undefined) {
@@ -447,27 +592,27 @@ export class RepositoriesView extends ViewBase<RepositoriesNode> {
 
 	@gate(() => '')
 	revealTag(
-		tag: GitTag,
+		tag: GitTagReference,
 		options?: {
 			select?: boolean;
 			focus?: boolean;
 			expand?: boolean | number;
-		}
+		},
 	) {
 		return window.withProgress(
 			{
 				location: ProgressLocation.Notification,
-				title: `Revealing tag '${tag.name}' in the Repositories view...`,
-				cancellable: true
+				title: `Revealing ${GitReference.toString(tag, { icon: false })} in the Repositories view...`,
+				cancellable: true,
 			},
 			async (progress, token) => {
 				const node = await this.findTag(tag, token);
-				if (node === undefined) return node;
+				if (node == null) return undefined;
 
 				await this.ensureRevealNode(node, options);
 
 				return node;
-			}
+			},
 		);
 	}
 
@@ -478,7 +623,7 @@ export class RepositoriesView extends ViewBase<RepositoriesNode> {
 			select?: boolean;
 			focus?: boolean;
 			expand?: boolean | number;
-		}
+		},
 	) {
 		const repoNodeId = RepositoryNode.getId(repoPath);
 
@@ -493,7 +638,7 @@ export class RepositoriesView extends ViewBase<RepositoriesNode> {
 				}
 
 				return false;
-			}
+			},
 		});
 
 		if (node !== undefined) {
@@ -503,62 +648,121 @@ export class RepositoriesView extends ViewBase<RepositoriesNode> {
 		return node;
 	}
 
-	private async ensureRevealNode(
-		node: ViewNode,
-		options?: {
-			select?: boolean;
-			focus?: boolean;
-			expand?: boolean | number;
-		}
-	) {
-		// Not sure why I need to reveal each parent, but without it the node won't be revealed
-		const nodes: ViewNode[] = [];
-
-		let parent: ViewNode | undefined = node;
-		while (parent !== undefined) {
-			nodes.push(parent);
-			parent = parent.getParent();
-		}
-		nodes.pop();
-
-		for (const n of nodes.reverse()) {
-			try {
-				await this.reveal(n, options);
-			} catch {}
-		}
-	}
-
 	private async setAutoRefresh(enabled: boolean, workspaceEnabled?: boolean) {
 		if (enabled) {
 			if (workspaceEnabled === undefined) {
 				workspaceEnabled = Container.context.workspaceState.get<boolean>(
 					WorkspaceState.ViewsRepositoriesAutoRefresh,
-					true
+					true,
 				);
 			} else {
 				await Container.context.workspaceState.update(
 					WorkspaceState.ViewsRepositoriesAutoRefresh,
-					workspaceEnabled
+					workspaceEnabled,
 				);
 			}
 		}
 
-		setCommandContext(CommandContext.ViewsRepositoriesAutoRefresh, enabled && workspaceEnabled);
+		void setContext(ContextKeys.ViewsRepositoriesAutoRefresh, enabled && workspaceEnabled);
 
 		this._onDidChangeAutoRefresh.fire();
 	}
 
-	private setBranchComparison(node: ViewNode, comparisonType: Exclude<ViewShowBranchComparison, false>) {
-		if (!(node instanceof CompareBranchNode)) return undefined;
-
-		return node.setComparisonType(comparisonType);
-	}
-
 	private setBranchesLayout(layout: ViewBranchesLayout) {
-		return configuration.updateEffective('views', 'repositories', 'branches', 'layout', layout);
+		return configuration.updateEffective('views', this.configKey, 'branches', 'layout', layout);
 	}
 
 	private setFilesLayout(layout: ViewFilesLayout) {
-		return configuration.updateEffective('views', 'repositories', 'files', 'layout', layout);
+		return configuration.updateEffective('views', this.configKey, 'files', 'layout', layout);
+	}
+
+	private setShowAvatars(enabled: boolean) {
+		return configuration.updateEffective('views', this.configKey, 'avatars', enabled);
+	}
+
+	private setShowBranchComparison(enabled: boolean) {
+		return configuration.updateEffective(
+			'views',
+			this.configKey,
+			'showBranchComparison',
+			enabled ? ViewShowBranchComparison.Working : false,
+		);
+	}
+
+	private setBranchShowBranchComparison(enabled: boolean) {
+		return configuration.updateEffective(
+			'views',
+			this.configKey,
+			'branches',
+			'showBranchComparison',
+			enabled ? ViewShowBranchComparison.Branch : false,
+		);
+	}
+
+	toggleSection(
+		key:
+			| 'showBranches'
+			| 'showCommits'
+			| 'showContributors'
+			// | 'showIncomingActivity'
+			| 'showRemotes'
+			| 'showStashes'
+			| 'showTags'
+			| 'showUpstreamStatus',
+		enabled: boolean,
+	) {
+		return configuration.updateEffective('views', this.configKey, key, enabled);
+	}
+
+	toggleSectionByNode(
+		node:
+			| BranchesNode
+			| BranchNode
+			| BranchTrackingStatusNode
+			| CompareBranchNode
+			| ContributorsNode
+			| ReflogNode
+			| RemotesNode
+			| StashesNode
+			| TagsNode,
+		enabled: boolean,
+	) {
+		if (node instanceof BranchesNode) {
+			return configuration.updateEffective('views', this.configKey, 'showBranches', enabled);
+		}
+
+		if (node instanceof BranchNode) {
+			return configuration.updateEffective('views', this.configKey, 'showCommits', enabled);
+		}
+
+		if (node instanceof BranchTrackingStatusNode) {
+			return configuration.updateEffective('views', this.configKey, 'showUpstreamStatus', enabled);
+		}
+
+		if (node instanceof CompareBranchNode) {
+			return this.setShowBranchComparison(enabled);
+		}
+
+		if (node instanceof ContributorsNode) {
+			return configuration.updateEffective('views', this.configKey, 'showContributors', enabled);
+		}
+
+		if (node instanceof ReflogNode) {
+			return configuration.updateEffective('views', this.configKey, 'showIncomingActivity', enabled);
+		}
+
+		if (node instanceof RemotesNode) {
+			return configuration.updateEffective('views', this.configKey, 'showRemotes', enabled);
+		}
+
+		if (node instanceof StashesNode) {
+			return configuration.updateEffective('views', this.configKey, 'showStashes', enabled);
+		}
+
+		if (node instanceof TagsNode) {
+			return configuration.updateEffective('views', this.configKey, 'showTags', enabled);
+		}
+
+		return Promise.resolve();
 	}
 }
